@@ -331,49 +331,49 @@ from PIL import Image
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='DQN agent')
     # Common arguments
-    parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"),
+    parser.add_argument('--exp_name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym-id', type=str, default="BreakoutNoFrameskip-v4",
+    parser.add_argument('--gym_id', type=str, default="BreakoutNoFrameskip-v4",
                         help='the id of the gym environment')
-    parser.add_argument('--learning-rate', type=float, default=1e-4,
+    parser.add_argument('--learning_rate', type=float, default=1e-4,
                         help='the learning rate of the optimizer')
     parser.add_argument('--seed', type=int, default=2,
                         help='seed of the experiment')
-    parser.add_argument('--total-timesteps', type=int, default=10000000,
+    parser.add_argument('--total_timesteps', type=int, default=10000000,
                         help='total timesteps of the experiments')
-    parser.add_argument('--torch-deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
+    parser.add_argument('--torch_deterministic', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, `torch.backends.cudnn.deterministic=False`')
     parser.add_argument('--cuda', type=lambda x:bool(strtobool(x)), default=True, nargs='?', const=True,
                         help='if toggled, cuda will not be enabled by default')
-    parser.add_argument('--prod-mode', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
+    parser.add_argument('--prod_mode', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='run the script in production mode and use wandb to log outputs')
-    parser.add_argument('--capture-video', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
+    parser.add_argument('--capture_video', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='weather to capture videos of the agent performances (check out `videos` folder)')
-    parser.add_argument('--wandb-project-name', type=str, default="cleanRL",
+    parser.add_argument('--wandb_project_name', type=str, default="cleanRL",
                         help="the wandb's project name")
-    parser.add_argument('--wandb-entity', type=str, default=None,
+    parser.add_argument('--wandb_entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
     
     # Algorithm specific arguments
-    parser.add_argument('--buffer-size', type=int, default=1000000,
+    parser.add_argument('--buffer_size', type=int, default=1000000,
                          help='the replay memory buffer size')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
-    parser.add_argument('--target-network-frequency', type=int, default=1000,
+    parser.add_argument('--target_network_frequency', type=int, default=1000,
                         help="the timesteps it takes to update the target network")
-    parser.add_argument('--max-grad-norm', type=float, default=0.5,
+    parser.add_argument('--max_grad_norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
-    parser.add_argument('--batch-size', type=int, default=32,
+    parser.add_argument('--batch_size', type=int, default=32,
                         help="the batch size of sample from the reply memory")
-    parser.add_argument('--start-e', type=float, default=1.,
+    parser.add_argument('--start_e', type=float, default=1.,
                         help="the starting epsilon for exploration")
-    parser.add_argument('--end-e', type=float, default=0.02,
+    parser.add_argument('--end_e', type=float, default=0.02,
                         help="the ending epsilon for exploration")
-    parser.add_argument('--exploration-fraction', type=float, default=0.10,
+    parser.add_argument('--exploration_fraction', type=float, default=0.10,
                         help="the fraction of `total-timesteps` it takes from start-e to go end-e")
-    parser.add_argument('--learning-starts', type=int, default=80000,
+    parser.add_argument('--learning_starts', type=int, default=80000,
                         help="timestep to start learning")
-    parser.add_argument('--train-frequency', type=int, default=4,
+    parser.add_argument('--train_frequency', type=int, default=4,
                         help="the frequency of training")
     parser.add_argument('--levy_mu', type=int, default=1,
                         help="mu of the levy dist to sample from")
