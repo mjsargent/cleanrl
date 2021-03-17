@@ -348,7 +348,7 @@ if __name__ == "__main__":
                         help='run the script in production mode and use wandb to log outputs')
     parser.add_argument('--capture_video', type=lambda x:bool(strtobool(x)), default=False, nargs='?', const=True,
                         help='weather to capture videos of the agent performances (check out `videos` folder)')
-    parser.add_argument('--wandb_project-name', type=str, default="cleanRL",
+    parser.add_argument('--wandb_project_name', type=str, default="cleanRL",
                         help="the wandb's project name")
     parser.add_argument('--wandb_entity', type=str, default=None,
                         help="the entity (team) of wandb's project")
@@ -358,7 +358,7 @@ if __name__ == "__main__":
                          help='the replay memory buffer size')
     parser.add_argument('--gamma', type=float, default=0.99,
                         help='the discount factor gamma')
-    parser.add_argument('--target_network-frequency', type=int, default=1000,
+    parser.add_argument('--target_network_frequency', type=int, default=1000,
                         help="the timesteps it takes to update the target network")
     parser.add_argument('--max_grad_norm', type=float, default=0.5,
                         help='the maximum norm for the gradient clipping')
