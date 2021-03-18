@@ -6,7 +6,7 @@ import gym
 from gym import spaces
 import cv2
 cv2.ocl.setUseOpenCL(False)
-
+from scipy.stats import norm
 
 class NoopResetEnv(gym.Wrapper):
     def __init__(self, env, noop_max=30):
@@ -367,6 +367,12 @@ if __name__ == "__main__":
                         help="timestep to start learning")
     parser.add_argument('--train_frequency', type=int, default=4,
                         help="the frequency of training")
+    parser.add_argument('--levy_mu', type=int, default=1,
+                        help="mu of the levy dist to sample from")
+    parser.add_argument('--levy_scale', type=float, default=0.1,
+                        help="scale of the levy dist to sample from")
+    parser.add_argument('--levy_clip', type=int, default=10,
+                        help="maximum number of repeated actions")
     args = parser.parse_args()
     if not args.seed:
         args.seed = int(time.time())
@@ -428,6 +434,23 @@ class ReplayBuffer():
                np.array(r_lst), np.array(s_prime_lst), \
                np.array(done_mask_lst)
 
+    def sample2(self, n):
+        idx = np.random.choice(len(self.buffer), n, replace=False)
+        minibatch = self.buffer[idx]
+
+        for transition in mini_batch:
+            s, a, r, s_prime, done_mask = transition
+            s_lst.append(s)
+            a_lst.append(a)
+            r_lst.append(r)
+            s_prime_lst.append(s_prime)
+            done_mask_lst.append(done_mask)
+
+        return np.array(s_lst), np.array(a_lst), \
+               np.array(r_lst), np.array(s_prime_lst), \
+               np.array(done_mask_lst)
+
+
 # ALGO LOGIC: initialize agent here:
 class Scale(nn.Module):
     def __init__(self, scale):
@@ -473,14 +496,37 @@ print(q_network)
 # TRY NOT TO MODIFY: start the game
 obs = env.reset()
 episode_reward = 0
+levy_count = 0
+final_levy_count = 0
+levy_action = 0
+on_levy=False
 for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
     obs = np.array(obs)
-    if random.random() < epsilon:
+
+    logits = q_network.forward(obs.reshape((1,)+obs.shape), device)
+    if args.capture_video:
+        env.set_q_values(logits.tolist())
+
+    if on_levy:
+        action = levy_action
+        levy_count = levy_count + 1
+        if levy_count == final_levy_count:
+            levy_count = 0
+            on_levy = False
+    
+    elif random.random() < epsilon:
         action = env.action_space.sample()
+        levy_action = action
+        uni = np.random.uniform(0,1,1)
+        samp = args.levy_mu + args.levy_scale * (norm.ppf(1-uni))**-2
+        final_levy_count = np.floor(np.clip(samp,0,args.levy_clip))
+        if final_levy_count > 1:
+            on_levy = True
+            levy_count = levy_count + 1
+
     else:
-        logits = q_network.forward(obs.reshape((1,)+obs.shape), device)
         action = torch.argmax(logits, dim=1).tolist()[0]
 
     # TRY NOT TO MODIFY: execute the game and log data.
@@ -523,6 +569,10 @@ for global_step in range(args.total_timesteps):
         # the real episode reward is actually the sum of episode reward of 5 lives
         # which we record through `info['episode']['r']` provided by gym.wrappers.RecordEpisodeStatistics
         obs, episode_reward = env.reset(), 0
+        on_levy=False
+        levy_action=0
+        levy_count=0
+        final_levy_count=0
 
 env.close()
 writer.close()
