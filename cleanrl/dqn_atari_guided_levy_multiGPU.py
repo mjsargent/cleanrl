@@ -566,7 +566,7 @@ class QNetworkGuidedLevy(nn.Module):
         z = torch.cat([z, n_out], dim = 1)
         q = self.q_head(z)
 
-        return q, z, n_out
+        return q, z, n_out, mu, scale
  
 class Sampler():
     def __init__(self, env, use_eps_greedy = True):
@@ -587,7 +587,7 @@ class Sampler():
             # action is the current action but still need
             # to generate logits 
             action = self.current_action
-            logits, z, n_out = network.forward(obs.reshape((1,)+obs.shape), n, device, initiate=False)
+            logits, z, n_out, mu, scale = network.forward(obs.reshape((1,)+obs.shape), n, device, initiate=False)
             #TODO decide if to store n locally
             self.current_traj_length = self.current_traj_length + 1
             if self.current_traj_length == self.final_traj_length:
@@ -597,7 +597,7 @@ class Sampler():
                 n_out = torch.zeros((1,1))
 
         else:
-            logits,z, n_out = network.forward(obs.reshape((1,)+obs.shape), n,  device, initiate=True)
+            logits, z, n_out, mu, scale = network.forward(obs.reshape((1,)+obs.shape), n,  device, initiate=True)
             # the n here is the n we want to concat to future passes
             # clip, floor and store a detached version for logic
             self.final_traj_length = n.clone().detach().cpu().numpy()
@@ -609,7 +609,7 @@ class Sampler():
             if rand_num < eps:
                 action = self.action_space.sample() 
 
-        return action, logits,z, n_out
+        return action, logits,z, n_out, mu, scale
     
 torch.autograd.set_detect_anomaly(True)
 rb = ReplayBufferActRepeat(args.buffer_size)
@@ -642,7 +642,7 @@ for global_step in range(args.total_timesteps):
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
     obs = np.array(obs)
 
-    action, logits, _, n  = sampler.sample(q_network, obs, device, n, epsilon)
+    action, logits, _, n, mu, scale  = sampler.sample(q_network, obs, device, n, epsilon)
     # EXPERIMENTAL PLEASE FIX SOON
     n = n.detach()
     next_n = n.clone().detach()
@@ -656,6 +656,8 @@ for global_step in range(args.total_timesteps):
         print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
         writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
         writer.add_scalar("charts/epsilon", epsilon, global_step)
+        writer.add_scalar("charts/mu", mu, global_step)
+        writer.add_scalar("charts/scale", scale, global_step)
 
     # ALGO LOGIC: training.
     # when storing n, we want to keep its computational graph
