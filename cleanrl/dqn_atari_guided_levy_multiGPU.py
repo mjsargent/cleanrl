@@ -366,6 +366,8 @@ if __name__ == "__main__":
                         help="timestep to start learning")
     parser.add_argument('--train_frequency', type=int, default=4,
                         help="the frequency of training")
+    parser.add_argument('--mu_net_coeff', type=float, default=3,
+                        help="coefficent used for determining the init of mu net")
     args = parser.parse_args()
     if not args.seed:
         args.seed = int(time.time())
@@ -520,7 +522,7 @@ class LevySampler(nn.Module):
         return n
 
 class QNetworkGuidedLevy(nn.Module):
-    def __init__(self, env, frames=4):
+    def __init__(self, env, frames=4, mu_init=None):
         super(QNetworkGuidedLevy, self).__init__()
         self.embedding = nn.Sequential(
             Scale(1/255),
@@ -535,12 +537,20 @@ class QNetworkGuidedLevy(nn.Module):
             nn.ReLU()
         )
         self.q_head = nn.Linear(512 + 1, env.action_space.n)
+        # init mu head such that initial expected mu > mu_min
+
         self.levy_mu_head = nn.Sequential(
                              nn.Linear(512, 128),
                              nn.ReLU(),
                              nn.Linear(128, 1),
                              nn.ReLU()
                              )
+        if mu_init is not None:
+            for m in self.levy_mu_head.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.normal(m.weight, mean=mu_init/512, std=0.1)
+                    nn.init.constant(m.bias, 512/128)
+
         self.levy_scale_head = nn.Sequential(
                              nn.Linear(512, 128),
                              nn.ReLU(),
@@ -613,11 +623,11 @@ class Sampler():
     
 torch.autograd.set_detect_anomaly(True)
 rb = ReplayBufferActRepeat(args.buffer_size)
-q_network = QNetworkGuidedLevy(env)
+q_network = QNetworkGuidedLevy(env, mu_init=args.mu_net_coeff)
 q_network = nn.DataParallel(q_network)
 q_network = q_network.to(device)
 
-target_network = QNetworkGuidedLevy(env)
+target_network = QNetworkGuidedLevy(env,mu_init=args.mu_net_coeff)
 target_network = nn.DataParallel(target_network)
 target_network = target_network.to(device)
 
