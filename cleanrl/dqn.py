@@ -11,6 +11,7 @@ from distutils.util import strtobool
 import collections
 import numpy as np
 import gym
+import gym_minigrid
 from gym.wrappers import TimeLimit, Monitor
 from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time

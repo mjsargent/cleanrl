@@ -613,6 +613,10 @@ class Sampler():
             self.final_traj_length = n.clone().detach().cpu().numpy()
             self.final_traj_length = np.floor(self.final_traj_length)
             action = torch.argmax(logits, dim=1).tolist()[0]
+            if self.final_traj_length > 1:
+                self.on_traj = True
+                self.current_traj_length = 1
+
 
         if self.use_eps_greedy:
             rand_num = random.random()
@@ -652,15 +656,14 @@ for global_step in range(args.total_timesteps):
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
     obs = np.array(obs)
 
-    action, logits, _, n, mu, scale  = sampler.sample(q_network, obs, device, n, epsilon)
+    action, logits, _, next_n, mu, scale  = sampler.sample(q_network, obs, device, n, epsilon)
     # EXPERIMENTAL PLEASE FIX SOON
     n = n.detach()
-    next_n = n.clone().detach()
+    next_n = next_n.detach()
 
     # TRY NOT TO MODIFY: execute the game and log data.
     next_obs, reward, done, info = env.step(action)
     episode_reward += reward
-    
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     if 'episode' in info.keys():
         print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
@@ -697,6 +700,12 @@ for global_step in range(args.total_timesteps):
         if global_step % 100 == 0:
             writer.add_scalar("losses/td_loss", loss, global_step)
 
+        # another loss that can be applied
+        # sequential frames will be next to each other
+        # get subsequence according to the n that is stored with them
+        # using "done" to terminate early
+        # use latent embedding norm as a target for n
+        
         # optimize the midel
         optimizer.zero_grad()
         loss.backward()
