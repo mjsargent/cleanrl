@@ -678,7 +678,6 @@ for global_step in range(args.total_timesteps):
     # EXPERIMENTAL PLEASE FIX SOON
     n = n.detach()
     next_n = next_n.detach()
-    env.render()
     # TRY NOT TO MODIFY: execute the game and log data.
     next_obs, reward, done, info = env.step(action)
     episode_reward += reward

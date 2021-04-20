@@ -688,7 +688,6 @@ for global_step in range(args.total_timesteps):
     else:
         action = torch.argmax(logits, dim=1).tolist()[0]
     # EXPERIMhENTAL PLEASE FIX SOON
-    env.render()
     # TRY NOT TO MODIFY: execute the game and log data.
     next_obs, reward, done, info = env.step(action)
     episode_reward += reward
