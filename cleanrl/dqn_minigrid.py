@@ -331,7 +331,7 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp_name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
-    parser.add_argument('--gym_id', type=str, default="BreakoutNoFrameskip-v4",
+    parser.add_argument('--gym_id', type=str, default="MiniGrid-FourRooms-v0",
                         help='the id of the gym environment')
     parser.add_argument('--learning_rate', type=float, default=1e-4,
                         help='the learning rate of the optimizer')
@@ -704,17 +704,15 @@ for global_step in range(args.total_timesteps):
     rb.put((obs, action, reward, next_obs, done))
 
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
-        s_obs, s_actions, s_rewards,s_n, s_next_obses, s_next_n, s_dones = rb.sample(args.batch_size)
+        s_obs, s_actions, s_rewards, s_next_obses, s_dones = rb.sample(args.batch_size)
 #        print(s_n)
-        s_n = torch.cat(s_n)
-        s_next_n = torch.cat(s_next_n)
         with torch.no_grad():
             # zero indexing the output just returns the logits
-            target_max = torch.max(target_network.forward(s_next_obses,s_next_n, device, initiate=False)[0], dim=1)[0]
+            target_max = torch.max(target_network.forward(s_next_obses, device), dim=1)[0]
 
             td_target = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
         # when storing n, does it need to be stored before being passed through
-        old_val = q_network.forward(s_obs,s_n, device, initiate=False)[0].gather(1, torch.LongTensor(s_actions).view(-1,1).to(device)).squeeze()
+        old_val = q_network.forward(s_obs, device).gather(1, torch.LongTensor(s_actions).view(-1,1).to(device)).squeeze()
         loss = loss_fn(td_target, old_val)
         
         if global_step % 100 == 0:
