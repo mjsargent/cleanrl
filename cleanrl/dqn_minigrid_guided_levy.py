@@ -471,6 +471,75 @@ class ReplayBufferActRepeat():
                np.array(s_prime_lst), n_nxt_lst, \
                np.array(done_mask_lst)
 
+class ReplayBufferActRepeatNStep():
+    def __init__(self, buffer_limit, gamma):
+        self.buffer = collections.deque(maxlen=buffer_limit)
+        self.nstep_buffer = [] 
+        self.gamma = gamma
+
+    def put(self, transition):
+        # need to also store q values to train temporal extender
+        if transition[3] == 0:
+            self.nstep_buffer = []
+            self.nstep_buffer.append(transition)
+            self.n = transition[3].detach().numpy()
+            return None 
+        # take q values and calcuate a target n based on the step with the highest value
+        if len(self.nstep_buffer < self.n):
+            self.nstep_buffer.append(transition)
+            return None
+
+        # MC up to N then bootstrap
+        # implementation lifted from https://github.com/qfettes/DeepRL-Tutorials/blob/master/02.NStep_DQN.ipynb
+
+        # TODO how to deal with Done flags? 
+        R_n = sum([self.nstep_buffer[i][2]*(self.gamma**i) for i in range(self.n)]) 
+        # want the position in the buffer of the highest q value
+        q = [tran[-1] for tran in self.nstep_buffer]
+        n_target = torch.argmax(torch.tensor(q))
+        first_state, first_action, _, _, _, _, _, _ = self.nstep_buffer[0]
+        self.nstep_buffer = [] 
+        
+        self.buffer.append([first_state, first_action, R_n, self.n, transition[4], self.n, transition[6], n_target])
+
+            
+    def sample(self, n):
+        mini_batch = random.sample(self.buffer, n)
+        s_lst, a_lst, r_lst, n_lst, s_prime_lst, n_nxt_lst,  done_mask_lst, n_target_lst = [], [], [], [], [], [], [], []
+        
+        for transition in mini_batch:
+            s, a, r, n, s_prime, n_nxt, done_mask, n_target= transition
+            s_lst.append(s)
+            a_lst.append(a)
+            r_lst.append(r)
+
+            
+            n_lst.append(n)
+
+            s_prime_lst.append(s_prime)
+
+            n_nxt_lst.append(n_nxt)
+
+            done_mask_lst.append(done_mask)
+            n_target_lst.append(n_target)
+
+        return np.array(s_lst), np.array(a_lst), \
+               np.array(r_lst), n_lst, \
+               np.array(s_prime_lst), n_nxt_lst, \
+               np.array(done_mask_lst), n_target_lst
+
+    def finish_nstep(self):
+        first_state, first_action, _, _, _, _, _, _  = self.nstep_buffer[0]
+        
+        transition = self.nstep_buffer[-1]
+        R_n = sum([self.nstep_buffer[i][2]*(self.gamma**i) for i in range(len(self.nstep_buffer))]) 
+
+        q = [tran[-1] for tran in self.nstep_buffer]
+        n_target = torch.argmax(torch.tensor(q))
+        self.nstep_buffer = [] 
+        
+        self.buffer.append([first_state, first_action, R_n, self.n, transition[4], self.n, transition[6], n_target])
+
 
 # ALGO LOGIC: initialize agent here:
 class Scale(nn.Module):
@@ -644,7 +713,7 @@ class Sampler():
 
         return action, logits,z, n_out, mu, scale
     
-rb = ReplayBufferActRepeat(args.buffer_size)
+rb = ReplayBufferActRepeatNStep(args.buffer_size, args.gamma)
 q_network = QNetworkGuidedLevy(env, mu_init=args.mu_net_coeff)
 q_network = nn.DataParallel(q_network)
 q_network = q_network.to(device)
@@ -659,6 +728,7 @@ sampler = Sampler(env)
 
 optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
 loss_fn = nn.MSELoss()
+loss_fn_n = nn.MSELoss()
 
 print(device.__repr__())
 print(q_network)
@@ -690,26 +760,38 @@ for global_step in range(args.total_timesteps):
 
     # alternatively, keep the tensor n, keep graph when going back, 
     # but do garbage collection
-
-    rb.put((obs, action, reward, n, next_obs, next_n, done))
+    rb.put((obs, action, reward, n, next_obs, next_n, done, logits[0][action]))
 
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
-        s_obs, s_actions, s_rewards,s_n, s_next_obses, s_next_n, s_dones = rb.sample(args.batch_size)
+        s_obs, s_actions, s_rewards,s_n, s_next_obses, s_next_n, s_dones, s_n_target = rb.sample(args.batch_size)
 #        print(s_n)
-        s_n = torch.cat(s_n)
-        s_next_n = torch.cat(s_next_n)
+        #print(s_n[0].shape)
+        #print(s_n_target[0].shape)
+
+        s_n = torch.tensor(s_n, device=device).squeeze(2)
+        s_next_n = torch.tensor(s_next_n,device=device).squeeze(2)
+        s_n_target = torch.tensor(s_n_target,device=device, dtype=torch.float)
+        # find td_loss
         with torch.no_grad():
             # zero indexing the output just returns the logits
-            target_max = torch.max(target_network.forward(s_next_obses,s_next_n, device, initiate=False)[0], dim=1)[0]
+            q_target, _, _, _, _ = target_network.forward(s_next_obses,s_next_n, device, initiate=False)
+            target_max = torch.max(q_target, dim=1)[0]
+            #target_max = torch.max(target_network.forward(s_next_obses,s_next_n, device, initiate=False)[0], dim=1)[0]
 
             td_target = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
         # when storing n, does it need to be stored before being passed through
-        old_val = q_network.forward(s_obs,s_n, device, initiate=False)[0].gather(1, torch.LongTensor(s_actions).view(-1,1).to(device)).squeeze()
-        loss = loss_fn(td_target, old_val)
         
+        old_val = q_network.forward(s_obs,s_n, device, initiate=False)[0].gather(1, torch.LongTensor(s_actions).view(-1,1).to(device)).squeeze()
+        q_old, _, n_old, _, _ = q_network.forward(s_obs, s_n, device, initiate=False)
+        q_old = q_old.gather(1, torch.LongTensor(s_actions).view(-1,1).to(device)).squeeze()
+ 
+        loss = loss_fn(td_target, old_val)
+        # find n loss
+        n_loss = loss_fn_n(s_n_target.unsqueeze(1), n_old)
+
         if global_step % 100 == 0:
             writer.add_scalar("losses/td_loss", loss, global_step)
-
+            writer.add_scalar("losses/n_loss", n_loss, global_step)
         # another loss that can be applied
         # sequential frames will be next to each other
         # get subsequence according to the n that is stored with them
@@ -718,7 +800,8 @@ for global_step in range(args.total_timesteps):
         
         # optimize the midel
         optimizer.zero_grad()
-        loss.backward()
+        loss.backward(retain_graph=True)
+        n_loss.backward()
         nn.utils.clip_grad_norm_(list(q_network.parameters()), args.max_grad_norm)
         optimizer.step()
         
@@ -743,6 +826,7 @@ for global_step in range(args.total_timesteps):
         writer.add_scalar("charts/mu", mu, global_step)
         writer.add_scalar("charts/scale", scale, global_step)
 
+        rb.finish_nstep() 
         obs, episode_reward = env.reset(), 0
         sampler.final_traj_length = 0
         sampler.current_traj_length = 0
