@@ -739,7 +739,7 @@ class Sampler():
             logits, z, n_out, mu, scale = network.forward(obs.reshape((1,)+obs.shape), n,  device, initiate=True)
             # the n here is the n we want to concat to future passes
             # clip, floor and store a detached version for logic
-            self.final_traj_length = n.clone().detach().cpu().numpy()
+            self.final_traj_length = n_out.clone().detach().cpu().numpy()
             self.final_traj_length = np.floor(self.final_traj_length)
             action = torch.argmax(logits, dim=1).tolist()[0]
             if self.final_traj_length > 1:
