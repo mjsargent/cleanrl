@@ -753,6 +753,9 @@ class Sampler():
         return action, logits,z, n_out, mu, scale
 # if atari, frame stack 4 otherwise assume rgb channels
 
+
+## Start of inits 
+
 frames = 4 if args.atari else 3
 
 rb = ReplayBufferActRepeatNStep(args.buffer_size, args.gamma)
@@ -776,6 +779,9 @@ print(device.__repr__())
 print(q_network)
 print(f"Using {torch.cuda.device_count()} GPUS")
 
+
+### Start of env loop
+
 # TRY NOT TO MODIFY: start the game
 obs = env.reset()
 episode_reward = 0
@@ -784,11 +790,14 @@ scale_total = []
 n = torch.zeros((1,1))
 n = n.to(device)
 
+import torch.autograd.profiler as profiler
+
 for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
     obs = np.array(obs)
     action, logits, _, next_n, mu, scale  = sampler.sample(q_network, obs, device, n, epsilon)
+
     # EXPERIMENTAL PLEASE FIX SOON
     n = n.detach()
     next_n = next_n.detach()
@@ -860,7 +869,7 @@ for global_step in range(args.total_timesteps):
         
         # optimize the midel
         optimizer.zero_grad()
-        loss.backward(retain_graph=True)
+        loss.backward()
         n_loss.backward()
         nn.utils.clip_grad_norm_(list(q_network.parameters()), args.max_grad_norm)
         optimizer.step()
