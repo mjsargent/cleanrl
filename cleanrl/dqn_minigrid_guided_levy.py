@@ -375,6 +375,9 @@ if __name__ == "__main__":
                         help="the frequency of training")
     parser.add_argument('--mu_net_coeff', type=float, default=3,
                         help="coefficent used for determining the init of mu net")
+    parser.add_argument('--scale_net_coeff', type=float, default=1,
+                        help="coefficent used for determining the init of scale net")
+
     args = parser.parse_args()
     if not args.seed:
         args.seed = int(time.time())
@@ -601,7 +604,7 @@ class LevySampler(nn.Module):
         return n
 
 class QNetworkGuidedLevy(nn.Module):
-    def __init__(self, env, frames=3, mu_init=None):
+    def __init__(self, env, frames=3, mu_init=None,scale_init=None):
         super(QNetworkGuidedLevy, self).__init__()
         n = env.observation_space.shape[0]
         m = env.observation_space.shape[1]
@@ -642,6 +645,13 @@ class QNetworkGuidedLevy(nn.Module):
                              nn.Linear(128, 1),
                              nn.ReLU()
                              )
+        if scale_init is not None:
+            for m in self.levy_scale_head.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.normal(m.weight, mean=scale_init/512, std=0.1)
+                    nn.init.constant(m.bias, 0)
+
+
         self.action_repeat_sampler = LevySampler(10, 100) # TODO add as argparse params
 
     # TODO concat (n, n_t) as option instead of jst n 
@@ -714,11 +724,11 @@ class Sampler():
         return action, logits,z, n_out, mu, scale
     
 rb = ReplayBufferActRepeatNStep(args.buffer_size, args.gamma)
-q_network = QNetworkGuidedLevy(env, mu_init=args.mu_net_coeff)
+q_network = QNetworkGuidedLevy(env, mu_init=args.mu_net_coeff,scale_init=args.scale_net_coeff)
 q_network = nn.DataParallel(q_network)
 q_network = q_network.to(device)
 
-target_network = QNetworkGuidedLevy(env,mu_init=args.mu_net_coeff)
+target_network = QNetworkGuidedLevy(env,mu_init=args.mu_net_coeff, scale_init=args.scale_net_coeff)
 target_network = nn.DataParallel(target_network)
 target_network = target_network.to(device)
 
@@ -737,6 +747,8 @@ print(f"Using {torch.cuda.device_count()} GPUS")
 # TRY NOT TO MODIFY: start the game
 obs = env.reset()
 episode_reward = 0
+mu_total = []
+scale_total = []
 n = torch.zeros((1,1))
 
 for global_step in range(args.total_timesteps):
@@ -751,6 +763,9 @@ for global_step in range(args.total_timesteps):
     # TRY NOT TO MODIFY: execute the game and log data.
     next_obs, reward, done, info = env.step(action)
     episode_reward += reward
+
+    mu_total.append(mu)
+    scale_total.append(scale)
     # TRY NOT TO MODIFY: record rewards for plotting purposes
         # ALGO LOGIC: training.
     # when storing n, we want to keep its computational graph
@@ -820,13 +835,18 @@ for global_step in range(args.total_timesteps):
     if done:
         # important to note that because `EpisodicLifeEnv` wrapper is applied,
         # the real episode reward is actually the sum of episode reward of 5 lives
+        average_mu = torch.mean(torch.cat(mu_total))
+        average_scale = torch.mean(torch.cat(scale_total))
+
         print(f"global_step={global_step}, episode_reward={episode_reward}")
         writer.add_scalar("charts/episode_reward", episode_reward, global_step)
         writer.add_scalar("charts/epsilon", epsilon, global_step)
-        writer.add_scalar("charts/mu", mu, global_step)
-        writer.add_scalar("charts/scale", scale, global_step)
+        writer.add_scalar("charts/average_mu", mu, global_step)
+        writer.add_scalar("charts/average_scale", scale, global_step)
 
         rb.finish_nstep() 
+        average_mu = []
+        average_scale = []
         obs, episode_reward = env.reset(), 0
         sampler.final_traj_length = 0
         sampler.current_traj_length = 0
