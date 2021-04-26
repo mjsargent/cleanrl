@@ -539,7 +539,6 @@ class ReplayBufferActRepeatNStep():
 
     def finish_nstep(self):
         if len(self.nstep_buffer) > 0:
-            print("Finishing early:",self.nstep_buffer)
 
             first_state, first_action, _, _, _, _, _, _  = self.nstep_buffer[0]
             
@@ -607,11 +606,10 @@ class LevySampler(nn.Module):
         mu = torch.clamp(mu, min=self.mu_min, max=self.mu_max)
         scale = torch.clamp(scale, min=self.scale_min, max=self.scale_max)
         n = mu + scale*noise
-        mask = torch.tensor([int(i > 0) for i in n_prev],device = mu.device)
-        mask = mask.unsqueeze(1)
-        print(n_prev)
-        print(n_prev.device)
-        n = n_prev*mask + n*(torch.ones_like(mask)-mask)
+      #  mask = torch.tensor([int(i > 0) for i in n_prev],device = mu.device)
+      #  mask = mask.unsqueeze(1)
+       # n = n_prev*mask + n*(torch.ones_like(mask)-mask)
+
         return n
 
 class QNetworkGuidedLevy(nn.Module):
@@ -798,8 +796,6 @@ for global_step in range(args.total_timesteps):
     next_obs, reward, done, info = env.step(action)
     episode_reward += reward
 
-    print("mu", mu)
-    print("n", n)
     mu_total.append(mu)
     scale_total.append(scale)
     # TRY NOT TO MODIFY: record rewards for plotting purposes
@@ -833,9 +829,9 @@ for global_step in range(args.total_timesteps):
 #        print(s_n)
         #print(s_n[0].shape)
         #print(s_n_target[0].shape)
-
-        s_n = torch.tensor(s_n, device=device).squeeze(2)
-        s_next_n = torch.tensor(s_next_n,device=device).squeeze(2)
+        
+        s_n = torch.tensor(s_n, device=device)
+        s_next_n = torch.tensor(s_next_n,device=device)
         s_n_target = torch.tensor(s_n_target,device=device, dtype=torch.float)
         # find td_loss with torch.no_grad(): zero indexing the output just returns the logits q_target, _, _, _, _ = target_network.forward(s_next_obses,s_next_n, device, initiate=False) target_max = torch.max(q_target, dim=1)[0]
 
