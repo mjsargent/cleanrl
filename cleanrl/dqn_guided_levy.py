@@ -490,21 +490,22 @@ class ReplayBufferActRepeatNStep():
         if transition[3] == 0:
             self.nstep_buffer = []
             self.nstep_buffer.append(transition)
-            self.n = transition[3].detach().numpy()
-            return None 
+            self.n = transition[5].detach()
+            return 
         # take q values and calcuate a target n based on the step with the highest value
-        if len(self.nstep_buffer < self.n):
+        if len(self.nstep_buffer) < self.n:
             self.nstep_buffer.append(transition)
-            return None
+            return 
 
         # MC up to N then bootstrap
         # implementation lifted from https://github.com/qfettes/DeepRL-Tutorials/blob/master/02.NStep_DQN.ipynb
 
         # TODO how to deal with Done flags? 
-        R_n = sum([self.nstep_buffer[i][2]*(self.gamma**i) for i in range(self.n)]) 
+        R_n = sum([self.nstep_buffer[i][2]*(self.gamma**i) for i in range(int(self.n.item()))]) 
         # want the position in the buffer of the highest q value
         q = [tran[-1] for tran in self.nstep_buffer]
-        n_target = torch.argmax(torch.tensor(q))
+        # TODO change this to not consider the value of the first state?
+        n_target = torch.argmax(torch.tensor(q)) + 1
         first_state, first_action, _, _, _, _, _, _ = self.nstep_buffer[0]
         self.nstep_buffer = [] 
         
@@ -537,16 +538,19 @@ class ReplayBufferActRepeatNStep():
                np.array(done_mask_lst), n_target_lst
 
     def finish_nstep(self):
-        first_state, first_action, _, _, _, _, _, _  = self.nstep_buffer[0]
-        
-        transition = self.nstep_buffer[-1]
-        R_n = sum([self.nstep_buffer[i][2]*(self.gamma**i) for i in range(len(self.nstep_buffer))]) 
+        if len(self.nstep_buffer) > 0:
+            print("Finishing early:",self.nstep_buffer)
 
-        q = [tran[-1] for tran in self.nstep_buffer]
-        n_target = torch.argmax(torch.tensor(q))
-        self.nstep_buffer = [] 
-        
-        self.buffer.append([first_state, first_action, R_n, self.n, transition[4], self.n, transition[6], n_target])
+            first_state, first_action, _, _, _, _, _, _  = self.nstep_buffer[0]
+            
+            transition = self.nstep_buffer[-1]
+            R_n = sum([self.nstep_buffer[i][2]*(self.gamma**i) for i in range(len(self.nstep_buffer))]) 
+
+            q = [tran[-1] for tran in self.nstep_buffer]
+            n_target = torch.argmax(torch.tensor(q))
+            self.nstep_buffer = [] 
+            
+            self.buffer.append([first_state, first_action, R_n, self.n, transition[4], self.n, transition[6], n_target])
 
 
 # ALGO LOGIC: initialize agent here:
@@ -605,6 +609,8 @@ class LevySampler(nn.Module):
         n = mu + scale*noise
         mask = torch.tensor([int(i > 0) for i in n_prev],device = mu.device)
         mask = mask.unsqueeze(1)
+        print(n_prev)
+        print(n_prev.device)
         n = n_prev*mask + n*(torch.ones_like(mask)-mask)
         return n
 
@@ -727,6 +733,7 @@ class Sampler():
                 self.final_traj_length = 0
                 self.on_traj = False
                 n_out = torch.zeros((1,1))
+                n_out = n_out.to(device)
 
         else:
             logits, z, n_out, mu, scale = network.forward(obs.reshape((1,)+obs.shape), n,  device, initiate=True)
@@ -752,11 +759,11 @@ frames = 4 if args.atari else 3
 
 rb = ReplayBufferActRepeatNStep(args.buffer_size, args.gamma)
 q_network = QNetworkGuidedLevy(env,frames=frames, mu_init=args.mu_net_coeff,scale_init=args.scale_net_coeff, atari=args.atari)
-q_network = nn.DataParallel(q_network)
+#q_network = nn.DataParallel(q_network)
 q_network = q_network.to(device)
 
 target_network = QNetworkGuidedLevy(env,frames=frames,mu_init=args.mu_net_coeff, scale_init=args.scale_net_coeff, atari=args.atari)
-target_network = nn.DataParallel(target_network)
+#target_network = nn.DataParallel(target_network)
 target_network = target_network.to(device)
 
 target_network.load_state_dict(q_network.state_dict())
@@ -777,12 +784,12 @@ episode_reward = 0
 mu_total = []
 scale_total = []
 n = torch.zeros((1,1))
+n = n.to(device)
 
 for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
     obs = np.array(obs)
-
     action, logits, _, next_n, mu, scale  = sampler.sample(q_network, obs, device, n, epsilon)
     # EXPERIMENTAL PLEASE FIX SOON
     n = n.detach()
@@ -791,6 +798,8 @@ for global_step in range(args.total_timesteps):
     next_obs, reward, done, info = env.step(action)
     episode_reward += reward
 
+    print("mu", mu)
+    print("n", n)
     mu_total.append(mu)
     scale_total.append(scale)
     # TRY NOT TO MODIFY: record rewards for plotting purposes
@@ -816,6 +825,8 @@ for global_step in range(args.total_timesteps):
 
 
     rb.put((obs, action, reward, n, next_obs, next_n, done, logits[0][action]))
+    
+    n = next_n
 
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
         s_obs, s_actions, s_rewards,s_n, s_next_obses, s_next_n, s_dones, s_n_target = rb.sample(args.batch_size)
@@ -892,6 +903,7 @@ for global_step in range(args.total_timesteps):
         sampler.current_traj_length = 0
         sampler.on_traj = False
         n = torch.zeros((1,1))
+        n.to(device)
 
 env.close()
 writer.close()

@@ -331,6 +331,8 @@ if __name__ == "__main__":
     # Common arguments
     parser.add_argument('--exp_name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
+    parser.add_argument('--atari',type=lambda x:bool(strtobool(x)),default=False,
+                        help='if env is an atari env, do atari preprocessing + alter conv architecture')
     parser.add_argument('--gym_id', type=str, default="BreakoutNoFrameskip-v4",
                         help='the id of the gym environment')
     parser.add_argument('--learning_rate', type=float, default=1e-4,
@@ -395,10 +397,14 @@ if args.prod_mode:
 # TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
 env = gym.make(args.gym_id)
-#env = wrap_atari(env)
-env = ImgObsWrapper(env)
 
-#env = gym.wrappers.RecordEpisodeStatistics(env) # records episode reward in `info['episode']['r']`
+if args.atari:
+    env=wrap_atari(env)
+    env=gym.wrappers.RecordEpisodeStatistics(env) 
+    env=wrap_deepmind(env, episode_life=True, clip_rewards=True, frame_stack=True, scale=False)
+else:
+    env=ImgObsWrapper(env)
+
 if args.capture_video:
     env = Monitor(env, f'videos/{experiment_name}')
 #env = wrap_deepmind(
@@ -407,7 +413,6 @@ if args.capture_video:
 #    frame_stack=True,
 #    scale=False,
 #)
-
 random.seed(args.seed)
 np.random.seed(args.seed)
 torch.manual_seed(args.seed)
@@ -485,7 +490,7 @@ class ReplayBufferActRepeatNStep():
         if transition[3] == 0:
             self.nstep_buffer = []
             self.nstep_buffer.append(transition)
-            self.n = transition[3].detach().numpy()
+            self.n = transition[3].detach()
             return None 
         # take q values and calcuate a target n based on the step with the highest value
         if len(self.nstep_buffer < self.n):
@@ -567,7 +572,7 @@ class QNetwork(nn.Module):
             nn.Flatten(),
             nn.Linear(3136, 512),
             nn.ReLU(),
-            nn.Linear(512, env.action_space.n)
+            nn.Linear(512,env.action_space.n)
         )
 
     def forward(self, x, device):
@@ -600,30 +605,50 @@ class LevySampler(nn.Module):
         n = mu + scale*noise
         mask = torch.tensor([int(i > 0) for i in n_prev],device = mu.device)
         mask = mask.unsqueeze(1)
-        n = n_prev*mask + n*(torch.ones_like(mask)-mask)
+
+        n = n_prev*mask + n*(torch.ones_like(mask, device=mu.device)-mask)
         return n
 
 class QNetworkGuidedLevy(nn.Module):
-    def __init__(self, env, frames=3, mu_init=None,scale_init=None):
+    def __init__(self, env, frames=3, mu_init=None,scale_init=None, atari=False):
         super(QNetworkGuidedLevy, self).__init__()
-        n = env.observation_space.shape[0]
-        m = env.observation_space.shape[1]
-        self.linear_embedding_size = 64* ((n-1)//2 -2) * ((m-1)//2 - 2) 
-        print("Linear Embedding Size: ", self.linear_embedding_size)
-        self.embedding = nn.Sequential(
-            Scale(1/255),
-            nn.Conv2d(frames, 16, (2,2) ),
-            nn.ReLU(),
-            nn.MaxPool2d((2,2)),
-            nn.Conv2d(16, 32, (2,2)),
-            nn.ReLU(),
+        self.atari = atari
+        if atari:
+            self.linear_embedding_size = 3136
+            self.embedding = nn.Sequential(
+                Scale(1/255),
+                nn.Conv2d(frames,32,8,stride=4),
+                nn.ReLU(),
+                nn.Conv2d(32,64,4,stride=2),
+                nn.ReLU(),
+                nn.Conv2d(64,64,3,stride=1),
+                nn.ReLU(),
+                nn.Flatten(),
+                nn.Linear(self.linear_embedding_size,512))
 
-            nn.Conv2d(32, 64,(2,2)),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(self.linear_embedding_size, 512),
-            nn.ReLU()
-        )
+        else:
+
+            n = env.observation_space.shape[0]
+            m = env.observation_space.shape[1]
+            self.linear_embedding_size = 64* ((n-1)//2 -2) * ((m-1)//2 - 2) 
+            print("Linear Embedding Size: ", self.linear_embedding_size)
+
+            self.embedding = nn.Sequential(
+                Scale(1/255),
+                nn.Conv2d(frames, 16, (2,2) ),
+                nn.ReLU(),
+                nn.MaxPool2d((2,2)),
+                nn.Conv2d(16, 32, (2,2)),
+                nn.ReLU(),
+
+                nn.Conv2d(32, 64,(2,2)),
+                nn.ReLU(),
+                nn.Flatten(),
+                nn.Linear(self.linear_embedding_size, 512),
+                nn.ReLU()
+            )
+       
+
         self.q_head = nn.Linear(512 + 1, env.action_space.n)
         # init mu head such that initial expected mu > mu_min
 
@@ -661,10 +686,10 @@ class QNetworkGuidedLevy(nn.Module):
     # n - t', where t' is relative time in sub trajectory, could be better for generalisation
     # 
     def forward(self, x,n_prev, device, initiate = False):
-        x = np.swapaxes(x,1,3)
+        if not self.atari:
+            x = np.swapaxes(x,1,3)
         #x = x.transpose(1,3).transpose(2,3)
         # x = x.contiguous()
-
         x = torch.Tensor(x).to(device)
         z = self.embedding(x)
         mu = self.levy_mu_head(z)
@@ -703,6 +728,7 @@ class Sampler():
                 self.final_traj_length = 0
                 self.on_traj = False
                 n_out = torch.zeros((1,1))
+                n_out = n_out.to(device)
 
         else:
             logits, z, n_out, mu, scale = network.forward(obs.reshape((1,)+obs.shape), n,  device, initiate=True)
@@ -722,14 +748,17 @@ class Sampler():
                 action = self.action_space.sample() 
 
         return action, logits,z, n_out, mu, scale
-    
+# if atari, frame stack 4 otherwise assume rgb channels
+
+frames = 4 if args.atari else 3
+
 rb = ReplayBufferActRepeatNStep(args.buffer_size, args.gamma)
-q_network = QNetworkGuidedLevy(env, mu_init=args.mu_net_coeff,scale_init=args.scale_net_coeff)
-q_network = nn.DataParallel(q_network)
+q_network = QNetworkGuidedLevy(env,frames=frames, mu_init=args.mu_net_coeff,scale_init=args.scale_net_coeff, atari=args.atari)
+#q_network = nn.DataParallel(q_network)
 q_network = q_network.to(device)
 
-target_network = QNetworkGuidedLevy(env,mu_init=args.mu_net_coeff, scale_init=args.scale_net_coeff)
-target_network = nn.DataParallel(target_network)
+target_network = QNetworkGuidedLevy(env,frames=frames,mu_init=args.mu_net_coeff, scale_init=args.scale_net_coeff, atari=args.atari)
+#target_network = nn.DataParallel(target_network)
 target_network = target_network.to(device)
 
 target_network.load_state_dict(q_network.state_dict())
@@ -749,13 +778,13 @@ obs = env.reset()
 episode_reward = 0
 mu_total = []
 scale_total = []
-n = torch.zeros((1,1))
+n = torch.zeros((1,1)).to(device)
 
 for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
     obs = np.array(obs)
-
+    print(n)
     action, logits, _, next_n, mu, scale  = sampler.sample(q_network, obs, device, n, epsilon)
     # EXPERIMENTAL PLEASE FIX SOON
     n = n.detach()
@@ -775,6 +804,19 @@ for global_step in range(args.total_timesteps):
 
     # alternatively, keep the tensor n, keep graph when going back, 
     # but do garbage collection
+    if args.atari and "episode" in info.keys():
+            average_mu = torch.mean(torch.cat(mu_total))
+            average_scale = torch.mean(torch.cat(scale_total))
+
+            print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
+            writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
+            writer.add_scalar("charts/epsilon", epsilon, global_step)
+            writer.add_scalar("charts/average_mu", mu, global_step)
+            writer.add_scalar("charts/average_scale", scale, global_step)
+            average_mu = []
+            average_scale = []
+
+
     rb.put((obs, action, reward, n, next_obs, next_n, done, logits[0][action]))
 
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
@@ -786,12 +828,10 @@ for global_step in range(args.total_timesteps):
         s_n = torch.tensor(s_n, device=device).squeeze(2)
         s_next_n = torch.tensor(s_next_n,device=device).squeeze(2)
         s_n_target = torch.tensor(s_n_target,device=device, dtype=torch.float)
-        # find td_loss
+        # find td_loss with torch.no_grad(): zero indexing the output just returns the logits q_target, _, _, _, _ = target_network.forward(s_next_obses,s_next_n, device, initiate=False) target_max = torch.max(q_target, dim=1)[0]
+
         with torch.no_grad():
-            # zero indexing the output just returns the logits
-            q_target, _, _, _, _ = target_network.forward(s_next_obses,s_next_n, device, initiate=False)
-            target_max = torch.max(q_target, dim=1)[0]
-            #target_max = torch.max(target_network.forward(s_next_obses,s_next_n, device, initiate=False)[0], dim=1)[0]
+            target_max = torch.max(target_network.forward(s_next_obses,s_next_n, device, initiate=False)[0], dim=1)[0]
 
             td_target = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
         # when storing n, does it need to be stored before being passed through
@@ -805,8 +845,8 @@ for global_step in range(args.total_timesteps):
         n_loss = loss_fn_n(s_n_target.unsqueeze(1), n_old)
 
         if global_step % 100 == 0:
-            writer.add_scalar("losses/td_loss", loss, global_step)
-            writer.add_scalar("losses/n_loss", n_loss, global_step)
+            writer.add_scalar("losses/td_loss", loss.data, global_step)
+            writer.add_scalar("losses/n_loss", n_loss.data, global_step)
         # another loss that can be applied
         # sequential frames will be next to each other
         # get subsequence according to the n that is stored with them
@@ -815,17 +855,18 @@ for global_step in range(args.total_timesteps):
         
         # optimize the midel
         optimizer.zero_grad()
-        loss.backward(retain_graph=True)
+        print("Before loss: ", torch.cuda.memory_allocated() / (1024 * 1024))
+        loss.backward()
         n_loss.backward()
+        print("After loss: ", torch.cuda.memory_allocated() / (1024 * 1024))
         nn.utils.clip_grad_norm_(list(q_network.parameters()), args.max_grad_norm)
         optimizer.step()
         
         # garbage collection
-        td_target = None
-        target_max = None
-        loss = None
-        old_val = None
-
+        del td_target 
+        del target_max 
+        del loss 
+        del old_val 
         # update the target network
         if global_step % args.target_network_frequency == 0:
             target_network.load_state_dict(q_network.state_dict())
@@ -835,23 +876,26 @@ for global_step in range(args.total_timesteps):
     if done:
         # important to note that because `EpisodicLifeEnv` wrapper is applied,
         # the real episode reward is actually the sum of episode reward of 5 lives
-        average_mu = torch.mean(torch.cat(mu_total))
-        average_scale = torch.mean(torch.cat(scale_total))
 
-        print(f"global_step={global_step}, episode_reward={episode_reward}")
-        writer.add_scalar("charts/episode_reward", episode_reward, global_step)
-        writer.add_scalar("charts/epsilon", epsilon, global_step)
-        writer.add_scalar("charts/average_mu", mu, global_step)
-        writer.add_scalar("charts/average_scale", scale, global_step)
+        if not args.atari:
+            average_mu = torch.mean(torch.cat(mu_total))
+            average_scale = torch.mean(torch.cat(scale_total))
+
+            print(f"global_step={global_step}, episode_reward={episode_reward}")
+            writer.add_scalar("charts/episode_reward", episode_reward, global_step)
+            writer.add_scalar("charts/epsilon", epsilon, global_step)
+            writer.add_scalar("charts/average_mu", mu, global_step)
+            writer.add_scalar("charts/average_scale", scale, global_step)
+            average_mu = []
+            average_scale = []
 
         rb.finish_nstep() 
-        average_mu = []
-        average_scale = []
         obs, episode_reward = env.reset(), 0
         sampler.final_traj_length = 0
         sampler.current_traj_length = 0
         sampler.on_traj = False
         n = torch.zeros((1,1))
+        n.to(device)
 
 env.close()
 writer.close()
