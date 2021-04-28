@@ -796,8 +796,10 @@ for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
     obs = np.array(obs)
+    #print("memory used before forward pass: ", torch.cuda.memory_allocated() / (1024 * 1024))
     action, logits, _, next_n, mu, scale  = sampler.sample(q_network, obs, device, n, epsilon)
 
+    #print("memory used after forward pass: ", torch.cuda.memory_allocated() / (1024 * 1024))
     # EXPERIMENTAL PLEASE FIX SOON
     n = n.detach()
     next_n = next_n.detach()
@@ -823,13 +825,15 @@ for global_step in range(args.total_timesteps):
             print(f"global_step={global_step}, episode_reward={info['episode']['r']}")
             writer.add_scalar("charts/episode_reward", info['episode']['r'], global_step)
             writer.add_scalar("charts/epsilon", epsilon, global_step)
-            writer.add_scalar("charts/average_mu", mu, global_step)
-            writer.add_scalar("charts/average_scale", scale, global_step)
+            writer.add_scalar("charts/average_mu", average_mu, global_step)
+            writer.add_scalar("charts/average_scale", average_scale, global_step)
             average_mu = []
             average_scale = []
+            mu_total = [] 
+            scale_total = []
 
 
-    rb.put((obs, action, reward, n, next_obs, next_n, done, logits[0][action]))
+    rb.put((obs, action, reward, n, next_obs, next_n, done, logits[0][action].detach()))
     
     n = next_n
 
@@ -869,6 +873,7 @@ for global_step in range(args.total_timesteps):
         
         # optimize the midel
         optimizer.zero_grad()
+       # print("memory used before loss: ", torch.cuda.memory_allocated() / (1024 * 1024))
         loss.backward()
         n_loss.backward()
         nn.utils.clip_grad_norm_(list(q_network.parameters()), args.max_grad_norm)
@@ -901,6 +906,8 @@ for global_step in range(args.total_timesteps):
             writer.add_scalar("charts/average_scale", scale, global_step)
             average_mu = []
             average_scale = []
+            mu_total = []
+            scale_total = []
 
         rb.finish_nstep() 
         obs, episode_reward = env.reset(), 0
