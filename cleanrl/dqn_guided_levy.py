@@ -587,7 +587,7 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     return max(slope * t + start_e, end_e)
 
 class LevySampler(nn.Module):
-    def __init__(self, mu_max, scale_max, mu_min = 1, scale_min=1e-5):
+    def __init__(self, mu_max, scale_max, mu_min = 1, scale_min=1e-4):
         super(LevySampler, self).__init__()
         self.mu_min = mu_min
         self.scale_min = scale_min
@@ -789,6 +789,9 @@ mu_total = []
 scale_total = []
 n = torch.zeros((1,1))
 n = n.to(device)
+n_params = sum([p.numel() for p in q_network.parameters()])
+writer.add_scalar("n_params", n_params)
+print("Number of parameters:", n_params)
 
 import torch.autograd.profiler as profiler
 

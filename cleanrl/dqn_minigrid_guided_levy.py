@@ -773,6 +773,11 @@ print(device.__repr__())
 print(q_network)
 print(f"Using {torch.cuda.device_count()} GPUS")
 
+n_params = sum([p.numel() for p in q_network.parameters()])
+writer.add_scalar("n_params", n_params)
+print("Number of parameters:", n_params)
+
+
 # TRY NOT TO MODIFY: start the game
 obs = env.reset()
 episode_reward = 0
