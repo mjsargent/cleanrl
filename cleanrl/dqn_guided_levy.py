@@ -601,11 +601,12 @@ class LevySampler(nn.Module):
 
         # use nonzero elements to create a batched mask 
         batch_size = mu.shape[0]
+        #TODO check this is behaving how we expect
         noise = torch.tensor((norm.ppf(1-np.random.rand(batch_size))**-2), dtype=torch.float, device=mu.device)
         noise = noise.unsqueeze(1)
         mu = torch.clamp(mu, min=self.mu_min, max=self.mu_max)
         scale = torch.clamp(scale, min=self.scale_min, max=self.scale_max)
-        n = mu + scale*noise
+        n = mu + noise*scale
       #  mask = torch.tensor([int(i > 0) for i in n_prev],device = mu.device)
       #  mask = mask.unsqueeze(1)
        # n = n_prev*mask + n*(torch.ones_like(mask)-mask)
@@ -662,7 +663,9 @@ class QNetworkGuidedLevy(nn.Module):
                              nn.ReLU()
                              )
         if mu_init is not None:
+            mu_init = mu_init if atari else mu_init / 10
             for m in self.levy_mu_head.modules():
+
                 if isinstance(m, nn.Linear):
                     nn.init.normal(m.weight, mean=mu_init/512, std=0.1)
                     nn.init.constant(m.bias, 512/128)
@@ -696,7 +699,9 @@ class QNetworkGuidedLevy(nn.Module):
         x = torch.Tensor(x).to(device)
         z = self.embedding(x)
         mu = self.levy_mu_head(z)
-        scale = self.levy_scale_head(z)
+        
+        log_scale = self.levy_scale_head(z)
+        scale =  torch.exp(0.5*log_scale)
         # will return sample only if n_prev is zeros
         n_out = self.action_repeat_sampler(mu, scale, n_prev)
         z = torch.cat([z, n_out], dim = 1)
@@ -801,7 +806,6 @@ for global_step in range(args.total_timesteps):
     obs = np.array(obs)
     #print("memory used before forward pass: ", torch.cuda.memory_allocated() / (1024 * 1024))
     action, logits, _, next_n, mu, scale  = sampler.sample(q_network, obs, device, n, epsilon)
-
     #print("memory used after forward pass: ", torch.cuda.memory_allocated() / (1024 * 1024))
     # EXPERIMENTAL PLEASE FIX SOON
     n = n.detach()
