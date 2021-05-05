@@ -491,10 +491,13 @@ class ReplayBufferActRepeatNStep():
             self.nstep_buffer = []
             self.nstep_buffer.append(transition)
             self.n = transition[5].detach()
+            
+            print(len(self.nstep_buffer))
             return 
         # take q values and calcuate a target n based on the step with the highest value
         if len(self.nstep_buffer) < self.n:
             self.nstep_buffer.append(transition)
+            print(len(self.nstep_buffer))
             return 
 
         # MC up to N then bootstrap
@@ -503,8 +506,9 @@ class ReplayBufferActRepeatNStep():
         # TODO how to deal with Done flags? 
         R_n = sum([self.nstep_buffer[i][2]*(self.gamma**i) for i in range(int(self.n.item()))]) 
         # want the position in the buffer of the highest q value
+        print(len(self.nstep_buffer))
         q = [tran[-1] for tran in self.nstep_buffer]
-        # TODO change this to not consider the value of the first state?
+        print(q)
         n_target = torch.argmax(torch.tensor(q)) + 1
         first_state, first_action, _, _, _, _, _, _ = self.nstep_buffer[0]
         self.nstep_buffer = [] 
