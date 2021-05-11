@@ -717,6 +717,7 @@ for global_step in range(args.total_timesteps):
 
             td_target = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
         # when storing n, does it need to be stored before being passed through
+        print("shape actions, ", torch.tensor(s_actions).shape)
         old_val = q_network.forward(s_obs, device).gather(1, torch.LongTensor(s_actions).view(-1,1).to(device)).squeeze()
         loss = loss_fn(td_target, old_val)
         
