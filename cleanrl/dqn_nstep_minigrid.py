@@ -1,11 +1,10 @@
 # https://github.com/facebookresearch/torchbeast/blob/master/torchbeast/core/environment.py
-
 import numpy as np
 from collections import deque
 import gym
 import gym_minigrid
 from gym import spaces
-from gym_minigrid.wrappers import ImgObsWrapper
+from gym_minigrid.wrappers import ImgObsWrapper, FullyObsWrapper
 import cv2
 cv2.ocl.setUseOpenCL(False)
 
@@ -377,6 +376,9 @@ if __name__ == "__main__":
                         help="coefficent used for determining the init of mu net")
     parser.add_argument("--n_steps", type=int, default=3, 
                               help = "number of steps used in nstep return")
+    parser.add_argument("--fully_observable", type=bool, default=False,
+                        help="use the fully observable env wrapper")
+
     args = parser.parse_args()
     if not args.seed:
         args.seed = int(time.time())
@@ -395,11 +397,17 @@ if args.prod_mode:
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
 env = gym.make(args.gym_id)
 #env = wrap_atari(env)
-env = ImgObsWrapper(env)
 
+if args.fully_observable:
+    print(args.fully_observable)
+    env = FullyObsWrapper(env)
+
+env = ImgObsWrapper(env)
 #env = gym.wrappers.RecordEpisodeStatistics(env) # records episode reward in `info['episode']['r']`
+
 if args.capture_video:
     env = Monitor(env, f'videos/{experiment_name}')
+
 #env = wrap_deepmind(
 #    env,
 #    clip_rewards=True,
@@ -694,7 +702,7 @@ class QNetworkN(nn.Module):
         n = env.observation_space.shape[0]
         m = env.observation_space.shape[1]
         self.linear_embedding_size = 64* ((n-1)//2 -2) * ((m-1)//2 - 2)
-
+        print(self.linear_embedding_size)
         self.embedding = nn.Sequential(
             Scale(1/255),
             nn.Conv2d(frames, 16, (2,2)),
@@ -739,7 +747,7 @@ class QNetworkN(nn.Module):
 
         q = self.q_head(z)
 
-        return q, n
+        return q, n, mu, scale
 
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
@@ -915,19 +923,23 @@ episode_reward = 0
 n = torch.zeros((1,1))
 on_levy = 0
 n_tracked = []
+scale_tracked = []
+scale_lower = 0.00001
+scale_higher = 0.1
 for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
     obs = np.array(obs)
 
    # action, logits, _,  = sampler.sample(q_network, obs, device, n, epsilon)
-    logits, n = q_network.forward(obs.reshape((1,)+obs.shape), device)
+    logits, n, mu, scale = q_network.forward(obs.reshape((1,)+obs.shape), device)
 
     if on_levy == 0:
         on_levy = n.clone().detach().cpu().numpy()
         on_levy = np.floor(on_levy) + 1 
         n_tracked.append(int(on_levy))
         current_levy_action = torch.argmax(logits, dim=1).tolist()[0]
+        scale_tracked.append(scale.clone().detach().cpu().numpy())#
 
     if random.random() < epsilon:
         action = env.action_space.sample() 
@@ -965,7 +977,9 @@ for global_step in range(args.total_timesteps):
 
             # quick and dirty loop; I just can't get my head around doing this with torch indexing function rn
             len_traj_current = 0
-            n_target = torch.zeros(len(s_len_trajs), requires_grad = False)
+
+            n_target = torch.zeros(len(s_len_trajs), requires_grad = False, device=device)
+
             for idx, len_traj in enumerate(s_len_trajs):
 #           +1 or not to +1 - think about the floor func. if n_out = 1, on_levy = 2 therefor taking two actions on this levy therfore not +1
                 n_target[idx] = torch.argmax(all_targets[len_traj_current:len_traj_current+len_traj])  \
@@ -975,23 +989,38 @@ for global_step in range(args.total_timesteps):
             
             # need to write function here to get the argmax of these values for each sub trajectory
         # when storing n, does it need to be stored before being passed through
-        old_val, _ = q_network.forward(s_obs, device)
+        old_val, _, old_mu, old_scale = q_network.forward(s_obs, device)
         old_val = old_val.gather(1, torch.LongTensor(s_actions).view(-1,1).to(device)).squeeze()
 
         len_traj_current = 0
 
-        _ , old_n = q_network.forward(s_all_states, device)
+        #_ , old_n, old_mu, _ = q_network.forward(s_all_states, device)
 
-        old_n_start = torch.zeros(len(s_len_trajs))
-        for i, len_traj in enumerate(s_len_trajs[:-1]):
+        #old_n_start = torch.zeros(len(s_len_trajs), device=device)
+        #for i, len_traj in enumerate(s_len_trajs[:-1]):
             #print(s_all_states.shape,i, len_traj, len_traj_current)
-            old_n_start[i] = old_n[len_traj_current]
+        #    old_n_start[i] = old_n[len_traj_current]
+            #with torch.no_grad():
+            #    scale_target[i] = scale_higher if old_mu[len_traj_current] < n_target[i] else scale_lower
+        #    len_traj_current+=len_traj
+        
 
-            len_traj_current+=len_traj
+        with torch.no_grad():
+            scale_target = torch.where(old_mu.squeeze(1) < n_target, scale_higher, scale_lower)
+        """
+        print("target shapes:")
+        print("td_target", td_target.shape)
+        print("old_val", td_target.shape)
+        print("n_target", n_target.shape)
+        print("old_n_start", old_n_start.shape)
+        print("scale_target", scale_target.shape)
+        print("old_target", old_scale.shape)
+        """
 
         loss = loss_fn(td_target, old_val)
-        n_loss = loss_fn(n_target, old_n_start) 
-        total_loss = loss + n_loss
+        n_loss = loss_fn(n_target, old_mu.squeeze(1)) 
+        scale_loss = loss_fn(scale_target, old_scale.squeeze(1))
+        total_loss = loss + n_loss + scale_loss
 
         if global_step % 100 == 0:
             writer.add_scalar("losses/td_loss", loss, global_step) 
@@ -1024,16 +1053,20 @@ for global_step in range(args.total_timesteps):
         # important to note that because `EpisodicLifeEnv` wrapper is applied,
         # the real episode reward is actually the sum of episode reward of 5 lives
         avg_n = np.mean(n_tracked)
+        avg_scale = np.mean(scale_tracked)
         print(f"global_step={global_step}, episode_reward={episode_reward}")
         writer.add_scalar("charts/episode_reward", episode_reward, global_step)
         writer.add_scalar("charts/epsilon", epsilon, global_step)
         writer.add_scalar("charts/avg_n", avg_n, global_step)
+        writer.add_scalar("charts/avg_scale", avg_scale, global_step)
         obs, episode_reward = env.reset(), 0
+
         n = torch.zeros((1,1))
         rb.finish_nstep()
         rb.nsteps = None
         on_levy = 0
         avg_n = 0
         n_tracked = []
+        scale_tracked = []
 env.close()
 writer.close()
