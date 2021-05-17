@@ -378,6 +378,8 @@ if __name__ == "__main__":
                               help = "number of steps used in nstep return")
     parser.add_argument("--fully_observable", type=bool, default=False,
                         help="use the fully observable env wrapper")
+    parser.add_argument("--clip_n", type = int, default = 100, 
+                        help="maximum number of action repeats")
 
     args = parser.parse_args()
     if not args.seed:
@@ -919,6 +921,8 @@ print("Number of parameters:", n_params)
 
 # TRY NOT TO MODIFY: start the game
 obs = env.reset()
+if args.gym_id == "MiniGrid-Empty-100x100-v0":
+    env.max_steps = 5000
 episode_reward = 0
 n = torch.zeros((1,1))
 on_levy = 0
@@ -936,10 +940,10 @@ for global_step in range(args.total_timesteps):
 
     if on_levy == 0:
         on_levy = n.clone().detach().cpu().numpy()
-        on_levy = np.floor(on_levy) + 1 
+        on_levy = np.clip(np.floor(on_levy) + 1, 0, args.clip_n)
         n_tracked.append(int(on_levy))
         current_levy_action = torch.argmax(logits, dim=1).tolist()[0]
-        scale_tracked.append(scale.clone().detach().cpu().numpy())#
+        scale_tracked.append(int(scale))#
 
     if random.random() < epsilon:
         action = env.action_space.sample() 
@@ -1025,7 +1029,14 @@ for global_step in range(args.total_timesteps):
         if global_step % 100 == 0:
             writer.add_scalar("losses/td_loss", loss, global_step) 
             writer.add_scalar("losses/n_loss", n_loss, global_step)
+
+            avg_n = np.mean(n_tracked)
+            avg_scale = np.mean(scale_tracked)
+            writer.add_scalar("charts/avg_n", avg_n, global_step)
+            writer.add_scalar("charts/avg_scale", avg_scale, global_step)
         # another loss that can be applied
+            n_tracked = []
+            scale_tracked = []
         # sequential frames will be next to each other
         # get subsequence according to the n that is stored with them
         # using "done" to terminate early
@@ -1052,21 +1063,18 @@ for global_step in range(args.total_timesteps):
     if done:
         # important to note that because `EpisodicLifeEnv` wrapper is applied,
         # the real episode reward is actually the sum of episode reward of 5 lives
-        avg_n = np.mean(n_tracked)
-        avg_scale = np.mean(scale_tracked)
         print(f"global_step={global_step}, episode_reward={episode_reward}")
         writer.add_scalar("charts/episode_reward", episode_reward, global_step)
         writer.add_scalar("charts/epsilon", epsilon, global_step)
-        writer.add_scalar("charts/avg_n", avg_n, global_step)
-        writer.add_scalar("charts/avg_scale", avg_scale, global_step)
         obs, episode_reward = env.reset(), 0
 
+        if args.gym_id == "MiniGrid-Empty-100x100-v0":
+            env.max_steps = 5000
+        
         n = torch.zeros((1,1))
         rb.finish_nstep()
         rb.nsteps = None
         on_levy = 0
-        avg_n = 0
-        n_tracked = []
-        scale_tracked = []
+
 env.close()
 writer.close()
