@@ -720,16 +720,16 @@ class QNetworkN(nn.Module):
         )
         self.q_head = nn.Linear(512, env.action_space.n)
 
-        self.mu_head = nn.Sequential(nn.Linear(512, 128),
-                                     nn.ReLU(),
-                                     nn.Linear(128, 1),
+        self.mu_head = nn.Sequential(nn.Linear(512, 64),
+                                     nn.Tanh(),
+                                     nn.Linear(64, 1),
                                      nn.ReLU() 
                                      )
 
-        self.scale_head = nn.Sequential(nn.Linear(512, 128),
-                                     nn.ReLU(),
-                                     nn.Linear(128, 1),
-                                     nn.ReLU() 
+        self.scale_head = nn.Sequential(nn.Linear(512, 64),
+                                     nn.Tanh(),
+                                     nn.Linear(64, 1),
+                                     #nn.ReLU() 
                                      )
 
         self.levy_head = LevyHead()
@@ -789,7 +789,7 @@ class QNetworkGuidedLevy(nn.Module):
         self.linear_embedding_size = 64* ((n-1)//2 -2) * ((m-1)//2 - 2) 
         print("Linear Embedding Size: ", self.linear_embedding_size)
         self.embedding = nn.Sequential(
-            Scale(1/255),
+            #Scale(1/255),
             nn.Conv2d(frames, 16, (2,2) ),
             nn.ReLU(),
             nn.MaxPool2d((2,2)),
@@ -806,9 +806,9 @@ class QNetworkGuidedLevy(nn.Module):
         # init mu head such that initial expected mu > mu_min
 
         self.levy_mu_head = nn.Sequential(
-                             nn.Linear(512, 128),
-                             nn.ReLU(),
-                             nn.Linear(128, 1),
+                             nn.Linear(512, 64),
+                             nn.Tanh(),
+                             nn.Linear(64, 1),
                              nn.ReLU()
                              )
         if mu_init is not None:
@@ -818,10 +818,10 @@ class QNetworkGuidedLevy(nn.Module):
                     nn.init.constant(m.bias, 512/128)
 
         self.levy_scale_head = nn.Sequential(
-                             nn.Linear(512, 128),
-                             nn.ReLU(),
-                             nn.Linear(128, 1),
-                             nn.ReLU()
+                             nn.Linear(512, 64),
+                             nn.Tanh(),
+                             nn.Linear(64, 1)
+                             #nn.ReLU()
                              )
         self.action_repeat_sampler = LevySampler(10, 100) # TODO add as argparse params
 
@@ -934,16 +934,14 @@ for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
     obs = np.array(obs)
-
    # action, logits, _,  = sampler.sample(q_network, obs, device, n, epsilon)
     logits, n, mu, scale = q_network.forward(obs.reshape((1,)+obs.shape), device)
-
     if on_levy == 0:
         on_levy = n.clone().detach().cpu().numpy()
         on_levy = np.clip(np.floor(on_levy) + 1, 0, args.clip_n)
         n_tracked.append(int(on_levy))
         current_levy_action = torch.argmax(logits, dim=1).tolist()[0]
-        scale_tracked.append(int(scale))#
+        scale_tracked.append(float(scale))#
 
     if random.random() < epsilon:
         action = env.action_space.sample() 
@@ -1034,6 +1032,7 @@ for global_step in range(args.total_timesteps):
             avg_scale = np.mean(scale_tracked)
             writer.add_scalar("charts/avg_n", avg_n, global_step)
             writer.add_scalar("charts/avg_scale", avg_scale, global_step)
+            writer.add_scalar("charts/last_target_n", int(n_target[0].item()))
         # another loss that can be applied
             n_tracked = []
             scale_tracked = []

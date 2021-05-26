@@ -706,7 +706,7 @@ class QNetworkN(nn.Module):
         self.linear_embedding_size = 64* ((n-1)//2 -2) * ((m-1)//2 - 2)
         print(self.linear_embedding_size)
         self.embedding = nn.Sequential(
-            Scale(1/255),
+            #Scale(1/255),
             nn.Conv2d(frames, 16, (2,2)),
             nn.ReLU(),
             nn.MaxPool2d((2,2)),
@@ -721,15 +721,15 @@ class QNetworkN(nn.Module):
         self.q_head = nn.Linear(512, env.action_space.n)
 
         self.mu_head = nn.Sequential(nn.Linear(512, 128),
-                                     nn.ReLU(),
-                                     nn.Linear(128, 1),
+                                     nn.Tanh(),
+                                     nn.Linear(64, 1),
                                      nn.ReLU() 
                                      )
 
         self.scale_head = nn.Sequential(nn.Linear(512, 128),
-                                     nn.ReLU(),
-                                     nn.Linear(128, 1),
-                                     nn.ReLU() 
+                                     nn.Tanh(),
+                                     nn.Linear(64, 1),
+                                     #nn.ReLU() 
                                      )
 
         self.levy_head = LevyHead()

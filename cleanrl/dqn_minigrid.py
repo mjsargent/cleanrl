@@ -685,7 +685,7 @@ for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
     obs = np.array(obs)
-
+    env.render()
    # action, logits, _,  = sampler.sample(q_network, obs, device, n, epsilon)
     logits = q_network.forward(obs.reshape((1,)+obs.shape), device)
     if random.random() < epsilon:

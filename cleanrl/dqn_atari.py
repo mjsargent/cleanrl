@@ -486,7 +486,7 @@ for global_step in range(args.total_timesteps):
     # TRY NOT TO MODIFY: execute the game and log data.
     next_obs, reward, done, info = env.step(action)
     episode_reward += reward
-    
+    env.render()    
     # TRY NOT TO MODIFY: record rewards for plotting purposes
     if 'episode' in info.keys():
         print(f"global_step={global_step}, episode_reward={info['episode']['r']}")

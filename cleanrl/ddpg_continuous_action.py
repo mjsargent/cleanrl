@@ -19,7 +19,7 @@ from gym.spaces import Discrete, Box, MultiBinary, MultiDiscrete, Space
 import time
 import random
 import os
-
+from scipy.stats import norm
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='DDPG agent')
     # Common arguments
@@ -67,6 +67,14 @@ if __name__ == "__main__":
                         help="the frequency of training policy (delayed)")
     parser.add_argument('--noise-clip', type=float, default=0.5,
                          help='noise clip parameter of the Target Policy Smoothing Regularization')
+    parser.add_argument('--use_levy', type=lambda x:bool(strtobool(x)), default=False,
+                         help='sample exploration noise from levy distribution')
+
+    parser.add_argument('--levy_mu', type=float, default=0,
+                         help='mu from levy distribution')
+    parser.add_argument('--levy_scale', type=float, default=0,
+                         help='scale from levy distribution')
+    
     args = parser.parse_args()
     if not args.seed:
         args.seed = int(time.time())
@@ -162,12 +170,19 @@ def linear_schedule(start_sigma: float, end_sigma: float, duration: int, t: int)
     slope =  (end_sigma - start_sigma) / duration
     return max(slope * t + start_sigma, end_sigma)
 
+def sampleFromLevy(mu,scale,action_space):
+    noise = norm.ppf(1 - np.random.rand(action_space.shape[0]))**-2
+    step = np.tile(mu, action_space.shape[0])  + np.tile(scale, action_space.shape[0])*noise
+    step = np.clip(step,action_space.low,action_space.high)
+
+    return step
+
 max_action = float(env.action_space.high[0])
 rb = ReplayBuffer(args.buffer_size)
-actor = Actor().to(device)
+actor = Actor(env).to(device)
 qf1 = QNetwork(env).to(device)
 qf1_target = QNetwork(env).to(device)
-target_actor = Actor().to(device)
+target_actor = Actor(env).to(device)
 target_actor.load_state_dict(actor.state_dict())
 qf1_target.load_state_dict(qf1.state_dict())
 q_optimizer = optim.Adam(list(qf1.parameters()), lr=args.learning_rate)
@@ -183,7 +198,15 @@ for global_step in range(args.total_timesteps):
         action = env.action_space.sample()
     else:
         action = actor.forward(obs.reshape((1,)+obs.shape), device)
-        action = (
+        if args.use_levy:
+            action = (
+                action.tolist()[0]
+            + sampleFromLevy(args.levy_mu, args.levy_scale, env.action_space)
+            ).clip(env.action_space.low, env.action_space.high)
+
+        else:
+
+            action = (
             action.tolist()[0]
             + np.random.normal(0, max_action * args.exploration_noise, size=env.action_space.shape[0])
         ).clip(env.action_space.low, env.action_space.high)

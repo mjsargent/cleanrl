@@ -704,6 +704,8 @@ for global_step in range(args.total_timesteps):
         action = env.action_space.sample() 
         repeated_action = action
         n_action_repeat = sampleFromLevy(mu, scale) 
+        n_action_repeat -= 1
+
     else:
         action = torch.argmax(logits, dim=1).tolist()[0]
     # EXPERIMhENTAL PLEASE FIX SOON
