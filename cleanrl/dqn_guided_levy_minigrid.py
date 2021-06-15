@@ -1150,7 +1150,7 @@ for global_step in range(args.total_timesteps):
                 if on_levy == 0:
                     on_levy = n.clone().detach().cpu().numpy()
                     on_levy = np.clip(np.floor(on_levy) + 1, 0, args.clip_n)
-
+                    print(on_levy)
                     current_levy_action = torch.argmax(logits, dim=1).tolist()[0]
 
                 if on_levy > 0:
@@ -1161,11 +1161,11 @@ for global_step in range(args.total_timesteps):
                 on_levy = on_levy - 1 
                 
                 # take a step
-                next_obs, reward, eval_done, info = env.step(action)
+                obs, reward, eval_done, info = env.step(action)
                 eval_episode_reward += reward
 
 
-            print(f"EVAL global_step={global_step}, eval_episode_reward={episode_reward}")
+            print(f"EVAL global_step={global_step}, eval_episode_reward={eval_episode_reward}")
             writer.add_scalar("charts/eval_episode_reward", eval_episode_reward, global_step)
             obs, episode_reward , eval_episode_reward= env.reset(), 0, 0
             eval_flag = False 
