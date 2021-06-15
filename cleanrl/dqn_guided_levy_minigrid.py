@@ -380,7 +380,15 @@ if __name__ == "__main__":
                         help="use the fully observable env wrapper")
     parser.add_argument("--clip_n", type = int, default = 100, 
                         help="maximum number of action repeats")
+    parser.add_argument('--eval_frequency', type=int, default=5000,
+                        help="the frequency of noiseless eval")
+    # n network losses
+    parser.add_argument("--obs_target", type=bool, default=False, help="use norm of the observations as a target")
+    parser.add_argument("--latent_target", type=bool, default=True, help= "use latent norm as a target")
+    parser.add_argument("--value_conditioning", type=bool, default=False, help= "condition the action repeat on the current value estimate")
+    parser.add_argument("--n_loss_weighting", type=float, default=0.5, help= "weightings of the value based and embedding based losses")
 
+    
     args = parser.parse_args()
     if not args.seed:
         args.seed = int(time.time())
@@ -690,66 +698,86 @@ class LevyHead(nn.Module):
     def __init__(self):
         super(LevyHead, self).__init__()
 
-    def forward(self, mu, scale):
+    def forward(self, mu, scale, use_noise = True):
         batch_size = mu.shape[0] 
         noise = torch.tensor((norm.ppf(1-np.random.rand(batch_size))**-2), dtype=torch.float, device=mu.device, requires_grad=False) 
         noise = noise.unsqueeze(1)  
-        scale = torch.clamp(scale, min=0.0001, max=0.1)                                                                           
-        n = mu + scale * noise 
+        scale = torch.clamp(scale, min=0, max=0.1)                                                                           
+        n = mu + scale * int(use_noise)*noise 
         return n 
 
+def layer_init(layer,std=np.sqrt(2),bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight,std)
+    torch.nn.init.constant_(layer.bias,bias_const)
+    return layer
+
 class QNetworkN(nn.Module):
-    def __init__(self, env, frames=3):
+    def __init__(self, env, frames=3, condition=False):
         super(QNetworkN, self).__init__()
         n = env.observation_space.shape[0]
         m = env.observation_space.shape[1]
+        
         self.linear_embedding_size = 64* ((n-1)//2 -2) * ((m-1)//2 - 2)
-        print(self.linear_embedding_size)
+        self.condition = condition
+        self.latent_dim = 512 + env.action_space.n if self.condition else 512
         self.embedding = nn.Sequential(
             Scale(1/255),
-            nn.Conv2d(frames, 16, (2,2)),
+            layer_init(nn.Conv2d(frames, 16, (2,2))),
             nn.ReLU(),
             nn.MaxPool2d((2,2)),
-            nn.Conv2d(16, 32,(2,2)),
+            layer_init(nn.Conv2d(16, 32,(2,2))),
             nn.ReLU(),
-            nn.Conv2d(32, 64, (2,2)),
+            layer_init(nn.Conv2d(32, 64, (2,2))),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(self.linear_embedding_size, 512),
+            layer_init(nn.Linear(self.linear_embedding_size, self.latent_dim)),
             nn.ReLU()
         )
-        self.q_head = nn.Linear(512, env.action_space.n)
+        self.q_head =layer_init( nn.Linear(512, env.action_space.n))
 
-        self.mu_head = nn.Sequential(nn.Linear(512, 64),
-                                     nn.Tanh(),
-                                     nn.Linear(64, 1),
+        self.mu_head = nn.Sequential(layer_init(nn.Linear(self.latent_dim, 64)),
+                                     nn.ReLU(),
+                                     layer_init(nn.Linear(64, 1)),
                                      nn.ReLU() 
                                      )
 
-        self.scale_head = nn.Sequential(nn.Linear(512, 64),
+        self.scale_head = nn.Sequential(layer_init(nn.Linear(self.latent_dim, 64)),
                                      nn.Tanh(),
-                                     nn.Linear(64, 1),
+                                     layer_init(nn.Linear(64, 1)),
                                      #nn.ReLU() 
                                      )
 
         self.levy_head = LevyHead()
 
-        self.n_head = nn.Linear(512, 1)
+        self.n_head = layer_init(nn.Linear(self.latent_dim, 1))
 
-    def forward(self, x, device):
+    def forward(self, x, device, use_noise=True):
         x = np.swapaxes(x,1,3)
 
         x = torch.Tensor(x).to(device)
-        z = self.embedding(x)
-        z_n = z.clone().detach()
+        if self.condition:
+            z = self.embedding(x)
+            q = self.q_head(z)
 
-        mu = self.mu_head(z_n)
-        scale = self.scale_head(z_n)
-        n = self.levy_head(mu, scale)
+            z_n = z.clone().detach()
+            # detach q as well?
+            z_n = torch.cat([z_n,q], axis = 1)
+            mu = self.mu_head(z_n)
+            scale = self.scale_head(z_n)
+            n = self.levy_head(mu, scale)
 
-        q = self.q_head(z)
+        else:
 
-        return q, n, mu, scale
+            z = self.embedding(x)
+            z_n = z.clone().detach()
+
+            mu = self.mu_head(z_n)
+            scale = self.scale_head(z_n)
+            n = self.levy_head(mu, scale, use_noise)
+
+            q = self.q_head(z)
+
+        return q, n, mu, scale, z_n
 
 
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
@@ -838,12 +866,16 @@ class QNetworkGuidedLevy(nn.Module):
 
         x = torch.Tensor(x).to(device)
         z = self.embedding(x)
-        mu = self.levy_mu_head(z)
-        scale = self.levy_scale_head(z)
-        # will return sample only if n_prev is zeros
-        n_out = self.action_repeat_sampler(mu, scale, n_prev)
-        z = torch.cat([z, n_out], dim = 1)
-        q = self.q_head(z)
+        if self.condition:
+            pass 
+        else:
+
+            mu = self.levy_mu_head(z)
+            scale = self.levy_scale_head(z)
+            # will return sample only if n_prev is zeros
+            n_out = self.action_repeat_sampler(mu, scale, n_prev)
+            z = torch.cat([z, n_out], dim = 1)
+            q = self.q_head(z)
 
         return q, z, n_out, mu, scale
  
@@ -927,43 +959,43 @@ episode_reward = 0
 n = torch.zeros((1,1))
 on_levy = 0
 n_tracked = []
+
+# define scale targets
 scale_tracked = []
-scale_lower = 0.00001
+scale_lower = 0.0
 scale_higher = 0.1
+
+eval_flag = False
+
 for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
     obs = np.array(obs)
-   # action, logits, _,  = sampler.sample(q_network, obs, device, n, epsilon)
-    logits, n, mu, scale = q_network.forward(obs.reshape((1,)+obs.shape), device)
+    logits, n, mu, scale, _ = q_network.forward(obs.reshape((1,)+obs.shape), device)
+    
+    # levy action selection logic
     if on_levy == 0:
         on_levy = n.clone().detach().cpu().numpy()
         on_levy = np.clip(np.floor(on_levy) + 1, 0, args.clip_n)
         n_tracked.append(int(on_levy))
-        current_levy_action = torch.argmax(logits, dim=1).tolist()[0]
+
+        if random.random() < epsilon:
+            current_levy_action = env.action_space.sample() 
+        else:
+            current_levy_action = torch.argmax(logits, dim=1).tolist()[0]
         scale_tracked.append(float(scale))#
 
-    if random.random() < epsilon:
-        action = env.action_space.sample() 
-
-    elif on_levy > 0:
+    if on_levy > 0:
         action = current_levy_action
     else:
         action = torch.argmax(logits, dim=1).tolist()[0]
+
     on_levy = on_levy - 1 
-    # EXPERIMhENTAL PLEASE FIX SOON
-    # TRY NOT TO MODIFY: execute the game and log data.
+    
+    # take a step
     next_obs, reward, done, info = env.step(action)
     episode_reward += reward
-    # TRY NOT TO MODIFY: record rewards for plotting purposes
-        # ALGO LOGIC: training.
-    # when storing n, we want to keep its computational graph
-    # other way of doing it, store:
-    #   init_obs, action, reward, (subsequent_obs), done
-    # prob - levy sampling is stocastic
 
-    # alternatively, keep the tensor n, keep graph when going back, 
-    # but do garbage collection
 
     rb.put((obs, action, reward, next_obs, done), n)
 
@@ -971,59 +1003,91 @@ for global_step in range(args.total_timesteps):
         s_obs, s_actions, s_rewards, s_next_obses, s_dones,s_len_trajs, s_all_states, s_all_next_states = rb.sample(args.batch_size)
 #        print(s_n)
         with torch.no_grad():
+            
+            # Get TD target
             # zero indexing the output just returns the logits
             target_max = torch.max(target_network.forward(s_next_obses, device)[0], dim=1)[0]
             td_target = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
-             
-            all_targets = target_network.forward(s_all_next_states, device)[0] 
-
-            # quick and dirty loop; I just can't get my head around doing this with torch indexing function rn
-            len_traj_current = 0
-
+            # get targets for n, either value based or latent embedding based             
             n_target = torch.zeros(len(s_len_trajs), requires_grad = False, device=device)
+            if args.latent_target:
+                all_z_old = q_network.forward(s_all_states,device)[4]
+                all_targets, _,_,_, all_z_targets = target_network.forward(s_all_next_states,device)
 
-            for idx, len_traj in enumerate(s_len_trajs):
-#           +1 or not to +1 - think about the floor func. if n_out = 1, on_levy = 2 therefor taking two actions on this levy therfore not +1
-                n_target[idx] = torch.argmax(all_targets[len_traj_current:len_traj_current+len_traj])  \
-                    if len_traj > 1 else 0 \
-                    
-                len_traj_current+=len_traj
-            
-            # need to write function here to get the argmax of these values for each sub trajectory
+                len_traj_current = 0
+
+                delta_z = all_z_targets-all_z_old 
+                delta_z_norms = torch.norm(delta_z, 2, dim = 1)      
+                value_loss_weighting = 0.5
+                n_target = torch.zeros(len(s_len_trajs), requires_grad = False, device=device)
+                n_weighted = False
+                n_argmax = False
+
+                n_sign_changes = True
+                value_loss = True
+                for idx, len_traj in enumerate(s_len_trajs):
+                    # TODO check for off by one error
+                    if n_weighted:
+                        norm_factor = delta_z_norms[len_traj_current:len_traj_current+len_traj].sum() if len_traj > 0 else 1
+                        weights = delta_z_norms[len_traj_current:len_traj_current+len_traj] / norm_factor if len_traj > 0 else 1
+                        weighted_n = weights * torch.arange(0,len_traj,device=device)
+                        n_target[idx] += (1-value_loss_weighting)*weighted_n.sum()
+                    if n_argmax:
+                        expected_z = delta_z[len_traj_current:len_traj_current+len_traj].mean() 
+                        n_target[idx] += torch.argmax(expected_z - delta_z[len_traj_current:len_traj_current+len_traj])  \
+                            if len_traj > 1 else 0 \
+
+                    if n_sign_changes:
+                        expected_z = delta_z_norms[len_traj_current:len_traj_current+len_traj].mean() 
+                        z_expected_diff = expected_z - delta_z_norms[len_traj_current:len_traj_current+len_traj]
+                        #TODO potentually correct for symmetry
+                        pos_actions =  (z_expected_diff <= 0).nonzero()
+                        # safety net for rounding errors
+                        if pos_actions.shape == (0,1):
+                            n_target[idx] += (1-value_loss_weighting)*len_traj
+                        else:
+                            n_target[idx] += (1-value_loss_weighting)*pos_actions[-1].item() if len_traj > 1 else 0
+                        
+                    if value_loss:
+                        n_target[idx] += value_loss_weighting *torch.argmax(all_targets[len_traj_current:len_traj_current+len_traj])  \
+                            if len_traj > 1 else 0 \
+
+                       # find sign changes
+                    len_traj_current+=len_traj
+                
+            else:
+
+                all_targets = target_network.forward(s_all_next_states, device)[0] 
+
+                # quick and dirty loop; I just can't get my head around doing this with torch indexing function rn
+                len_traj_current = 0
+
+                n_target = torch.zeros(len(s_len_trajs), requires_grad = False, device=device)
+
+                for idx, len_traj in enumerate(s_len_trajs):
+                # +1 or not to +1 - think about the floor func. if n_out = 1, on_levy = 2 therefor taking two actions on this levy therfore not +1
+                    n_target[idx] = torch.argmax(all_targets[len_traj_current:len_traj_current+len_traj])  \
+                        if len_traj > 1 else 0 \
+                        
+                    len_traj_current+=len_traj
+                
+        # need to write function here to get the argmax of these values for each sub trajectory
         # when storing n, does it need to be stored before being passed through
-        old_val, _, old_mu, old_scale = q_network.forward(s_obs, device)
+        old_val, _, old_mu, old_scale, _ = q_network.forward(s_obs, device)
         old_val = old_val.gather(1, torch.LongTensor(s_actions).view(-1,1).to(device)).squeeze()
 
         len_traj_current = 0
 
-        #_ , old_n, old_mu, _ = q_network.forward(s_all_states, device)
-
-        #old_n_start = torch.zeros(len(s_len_trajs), device=device)
-        #for i, len_traj in enumerate(s_len_trajs[:-1]):
-            #print(s_all_states.shape,i, len_traj, len_traj_current)
-        #    old_n_start[i] = old_n[len_traj_current]
-            #with torch.no_grad():
-            #    scale_target[i] = scale_higher if old_mu[len_traj_current] < n_target[i] else scale_lower
-        #    len_traj_current+=len_traj
-        
-
         with torch.no_grad():
             scale_target = torch.where(old_mu.squeeze(1) < n_target, scale_higher, scale_lower)
-        """
-        print("target shapes:")
-        print("td_target", td_target.shape)
-        print("old_val", td_target.shape)
-        print("n_target", n_target.shape)
-        print("old_n_start", old_n_start.shape)
-        print("scale_target", scale_target.shape)
-        print("old_target", old_scale.shape)
-        """
-
+        
+        # calc losses
         loss = loss_fn(td_target, old_val)
         n_loss = loss_fn(n_target, old_mu.squeeze(1)) 
         scale_loss = loss_fn(scale_target, old_scale.squeeze(1))
         total_loss = loss + n_loss + scale_loss
-
+        
+        # logging
         if global_step % 100 == 0:
             writer.add_scalar("losses/td_loss", loss, global_step) 
             writer.add_scalar("losses/n_loss", n_loss, global_step)
@@ -1033,15 +1097,10 @@ for global_step in range(args.total_timesteps):
             writer.add_scalar("charts/avg_n", avg_n, global_step)
             writer.add_scalar("charts/avg_scale", avg_scale, global_step)
             writer.add_scalar("charts/last_target_n", int(n_target[0].item()))
-        # another loss that can be applied
             n_tracked = []
             scale_tracked = []
-        # sequential frames will be next to each other
-        # get subsequence according to the n that is stored with them
-        # using "done" to terminate early
-        # use latent embedding norm as a target for n
-        
-        # optimize the midel
+
+        # optimize the model
         optimizer.zero_grad()
         total_loss.backward()
         nn.utils.clip_grad_norm_(list(q_network.parameters()), args.max_grad_norm)
@@ -1056,6 +1115,11 @@ for global_step in range(args.total_timesteps):
         # update the target network
         if global_step % args.target_network_frequency == 0:
             target_network.load_state_dict(q_network.state_dict())
+
+    # give sign to eval when done with current training episode
+
+    if global_step % args.eval_frequency == 0:
+        eval_flag = True
 
     # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
     obs = next_obs
@@ -1074,6 +1138,39 @@ for global_step in range(args.total_timesteps):
         rb.finish_nstep()
         rb.nsteps = None
         on_levy = 0
+        
+        if eval_flag:
+            eval_done = False 
+            eval_episode_reward = 0
+            # do eval loop
+            while not eval_done:
+                logits, n, _,_, _ = q_network.forward(obs.reshape((1,)+obs.shape), device, use_noise = False)
+                
+                # levy action selection logic
+                if on_levy == 0:
+                    on_levy = n.clone().detach().cpu().numpy()
+                    on_levy = np.clip(np.floor(on_levy) + 1, 0, args.clip_n)
+
+                    current_levy_action = torch.argmax(logits, dim=1).tolist()[0]
+
+                if on_levy > 0:
+                    action = current_levy_action
+                else:
+                    action = torch.argmax(logits, dim=1).tolist()[0]
+
+                on_levy = on_levy - 1 
+                
+                # take a step
+                next_obs, reward, eval_done, info = env.step(action)
+                eval_episode_reward += reward
+
+
+            print(f"EVAL global_step={global_step}, eval_episode_reward={episode_reward}")
+            writer.add_scalar("charts/eval_episode_reward", eval_episode_reward, global_step)
+            obs, episode_reward , eval_episode_reward= env.reset(), 0, 0
+            eval_flag = False 
+            eval_done = False
+            on_levy = 0 
 
 env.close()
 writer.close()

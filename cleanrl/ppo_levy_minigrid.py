@@ -260,7 +260,7 @@ class Agent(nn.Module):
         logits = self.get_logits(x)
         mu = self.get_mu(x)
         scale = self.get_scale(x)
-
+        z= self.forward(x)
         n = self.policy_repeat_sampler(mu,scale) 
 
         if prev_pol is not None and prev_n is not None:
@@ -274,7 +274,7 @@ class Agent(nn.Module):
          #   print("probs", probs)
             action = probs.sample()
 
-        return action, probs.log_prob(action), probs.entropy(), n, logits, mu, scale
+        return action, probs.log_prob(action), probs.entropy(), n, logits, mu, scale, z
 
     def get_value(self, x):
         return self.critic(self.forward(x))
@@ -294,7 +294,7 @@ dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
 values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 prev_n = None
 prev_pol = None
-# TRY NOT TO MODIFY: start the game
+# TRY NOT TO MODIFY: start the game, z, z, z, z, z, z
 global_step = 0
 # Note how `next_obs` and `next_done` are used; their usage is equivalent to
 # https://github.com/ikostrikov/pytorch-a2c-ppo-acktr-gail/blob/84a7582477fb0d5c82ad6d850fe476829dddd2e1/a2c_ppo_acktr/storage.py#L60
@@ -317,7 +317,7 @@ for update in range(1, num_updates+1):
         # ALGO LOGIC: put action logic here
         with torch.no_grad():
             values[step] = agent.get_value(obs[step]).flatten()
-            action, logproba, _, n, logits, mu, scale = agent.get_action(obs[step],prev_pol=prev_pol,prev_n= prev_n )
+            action, logproba, _, n, logits, mu, scale, z = agent.get_action(obs[step],prev_pol=prev_pol,prev_n= prev_n )
         prev_pol = logits
         prev_n = n
 
@@ -388,7 +388,7 @@ for update in range(1, num_updates+1):
             if args.norm_adv:
                 mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
-            _, newlogproba, entropy, _, _, _, _ = agent.get_action(b_obs[minibatch_ind], b_actions.long()[minibatch_ind])
+            _, newlogproba, entropy, _, _, _, _ ,_= agent.get_action(b_obs[minibatch_ind], b_actions.long()[minibatch_ind])
             ratio = (newlogproba - b_logprobs[minibatch_ind]).exp()
 
             # Stats
