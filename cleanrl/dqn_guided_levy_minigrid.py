@@ -385,6 +385,11 @@ if __name__ == "__main__":
     # n network losses
     parser.add_argument("--obs_target", type=bool, default=False, help="use norm of the observations as a target")
     parser.add_argument("--latent_target", type=bool, default=True, help= "use latent norm as a target")
+    parser.add_argument("--n_weighted", type=bool, default=False, help= "use weighted target n")
+    parser.add_argument("--n_argmax",type = bool,default=False,  help= "take the argmax of latent loss as a target")
+    parser.add_argument("--n_sign_changes", type=bool, default=False, help= "use sign changes to choose an n as a target")
+    parser.add_argument("--value_loss", type=bool, default=True, help= "use value as a target")
+
     parser.add_argument("--value_conditioning", type=bool, default=False, help= "condition the action repeat on the current value estimate")
     parser.add_argument("--n_loss_weighting", type=float, default=0.5, help= "weightings of the value based and embedding based losses")
 
@@ -735,10 +740,10 @@ class QNetworkN(nn.Module):
         )
         self.q_head =layer_init( nn.Linear(512, env.action_space.n))
 
-        self.mu_head = nn.Sequential(layer_init(nn.Linear(self.latent_dim, 64)),
+        self.mu_head = nn.Sequential(nn.Linear(self.latent_dim, 64),
                                      nn.ReLU(),
-                                     layer_init(nn.Linear(64, 1)),
-                                     nn.ReLU() 
+                                     nn.Linear(64, 1),
+                                     #nn.ReLU() 
                                      )
 
         self.scale_head = nn.Sequential(layer_init(nn.Linear(self.latent_dim, 64)),
@@ -941,6 +946,7 @@ sampler = Sampler(env)
 
 optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
 loss_fn = nn.MSELoss()
+loss_fn_n = nn.L1Loss()
 
 print(device.__repr__())
 print(q_network)
@@ -1020,24 +1026,22 @@ for global_step in range(args.total_timesteps):
                 delta_z_norms = torch.norm(delta_z, 2, dim = 1)      
                 value_loss_weighting = 0.5
                 n_target = torch.zeros(len(s_len_trajs), requires_grad = False, device=device)
-                n_weighted = False
-                n_argmax = False
 
-                n_sign_changes = True
                 value_loss = True
                 for idx, len_traj in enumerate(s_len_trajs):
                     # TODO check for off by one error
-                    if n_weighted:
+                    if args.n_weighted:
                         norm_factor = delta_z_norms[len_traj_current:len_traj_current+len_traj].sum() if len_traj > 0 else 1
                         weights = delta_z_norms[len_traj_current:len_traj_current+len_traj] / norm_factor if len_traj > 0 else 1
                         weighted_n = weights * torch.arange(0,len_traj,device=device)
                         n_target[idx] += (1-value_loss_weighting)*weighted_n.sum()
-                    if n_argmax:
+
+                    if args.n_argmax:
                         expected_z = delta_z[len_traj_current:len_traj_current+len_traj].mean() 
                         n_target[idx] += torch.argmax(expected_z - delta_z[len_traj_current:len_traj_current+len_traj])  \
                             if len_traj > 1 else 0 \
 
-                    if n_sign_changes:
+                    if args.n_sign_changes:
                         expected_z = delta_z_norms[len_traj_current:len_traj_current+len_traj].mean() 
                         z_expected_diff = expected_z - delta_z_norms[len_traj_current:len_traj_current+len_traj]
                         #TODO potentually correct for symmetry
@@ -1048,7 +1052,7 @@ for global_step in range(args.total_timesteps):
                         else:
                             n_target[idx] += (1-value_loss_weighting)*pos_actions[-1].item() if len_traj > 1 else 0
                         
-                    if value_loss:
+                    if args.value_loss:
                         n_target[idx] += value_loss_weighting *torch.argmax(all_targets[len_traj_current:len_traj_current+len_traj])  \
                             if len_traj > 1 else 0 \
 
@@ -1083,7 +1087,7 @@ for global_step in range(args.total_timesteps):
         
         # calc losses
         loss = loss_fn(td_target, old_val)
-        n_loss = loss_fn(n_target, old_mu.squeeze(1)) 
+        n_loss = loss_fn_n(n_target, old_mu.squeeze(1)) 
         scale_loss = loss_fn(scale_target, old_scale.squeeze(1))
         total_loss = loss + n_loss + scale_loss
         
@@ -1142,15 +1146,18 @@ for global_step in range(args.total_timesteps):
         if eval_flag:
             eval_done = False 
             eval_episode_reward = 0
+            n_tracked_eval = []
+            mu_tracked_eval = []
             # do eval loop
             while not eval_done:
-                logits, n, _,_, _ = q_network.forward(obs.reshape((1,)+obs.shape), device, use_noise = False)
-                
+                logits, n, mu,_, _ = q_network.forward(obs.reshape((1,)+obs.shape), device, use_noise = False)
+                 
+                mu_tracked_eval.append(float(mu))
                 # levy action selection logic
                 if on_levy == 0:
                     on_levy = n.clone().detach().cpu().numpy()
                     on_levy = np.clip(np.floor(on_levy) + 1, 0, args.clip_n)
-                    print(on_levy)
+                    n_tracked_eval.append(on_levy)
                     current_levy_action = torch.argmax(logits, dim=1).tolist()[0]
 
                 if on_levy > 0:
@@ -1164,9 +1171,14 @@ for global_step in range(args.total_timesteps):
                 obs, reward, eval_done, info = env.step(action)
                 eval_episode_reward += reward
 
-
-            print(f"EVAL global_step={global_step}, eval_episode_reward={eval_episode_reward}")
+            avg_n_eval = np.mean(n_tracked_eval)
+            avg_mu_eval = np.mean(mu_tracked_eval)
+            std_mu_eval = np.std(mu_tracked_eval)
+            print(f"|| EVAL || global_step={global_step}, eval_episode_reward={eval_episode_reward}, avg_n={avg_n_eval},avg_mu={avg_mu_eval}, std_mu={std_mu_eval}")
             writer.add_scalar("charts/eval_episode_reward", eval_episode_reward, global_step)
+            writer.add_scalar("charts/eval_avg_n", avg_n_eval, global_step)
+            writer.add_scalar("charts/eval_avg_mu", avg_mu_eval, global_step)
+            writer.add_scalar("charts/eval_std_mu", std_mu_eval, global_step)
             obs, episode_reward , eval_episode_reward= env.reset(), 0, 0
             eval_flag = False 
             eval_done = False
