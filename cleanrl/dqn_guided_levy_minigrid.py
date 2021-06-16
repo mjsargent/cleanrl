@@ -1024,7 +1024,7 @@ for global_step in range(args.total_timesteps):
 
                 delta_z = all_z_targets-all_z_old 
                 delta_z_norms = torch.norm(delta_z, 2, dim = 1)      
-                value_loss_weighting = 0.5
+                value_loss_weighting = args.n_loss_weighting
                 n_target = torch.zeros(len(s_len_trajs), requires_grad = False, device=device)
 
                 value_loss = True
