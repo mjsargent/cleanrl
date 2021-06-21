@@ -392,6 +392,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--value_conditioning", type=bool, default=False, help= "condition the action repeat on the current value estimate")
     parser.add_argument("--n_loss_weighting", type=float, default=0.5, help= "weightings of the value based and embedding based losses")
+    parser.add_argument("--discount_latent_embedding", type=bool, default=1, help= "discount along the trajectories")
 
     
     args = parser.parse_args()
@@ -413,11 +414,13 @@ device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cp
 env = gym.make(args.gym_id)
 #env = wrap_atari(env)
 
+
 if args.fully_observable:
-    print(args.fully_observable)
     env = FullyObsWrapper(env)
+    print("Fully Observable Obs space: ", env.observation_space)
 
 env = ImgObsWrapper(env)
+print("Obs space: ", env.observation_space)
 #env = gym.wrappers.RecordEpisodeStatistics(env) # records episode reward in `info['episode']['r']`
 
 if args.capture_video:
@@ -723,6 +726,7 @@ class QNetworkN(nn.Module):
         m = env.observation_space.shape[1]
         
         self.linear_embedding_size = 64* ((n-1)//2 -2) * ((m-1)//2 - 2)
+        print(self.linear_embedding_size)
         self.condition = condition
         self.latent_dim = 512 + env.action_space.n if self.condition else 512
         self.embedding = nn.Sequential(
@@ -978,11 +982,11 @@ for global_step in range(args.total_timesteps):
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
     obs = np.array(obs)
     logits, n, mu, scale, _ = q_network.forward(obs.reshape((1,)+obs.shape), device)
-    
     # levy action selection logic
     if on_levy == 0:
         on_levy = n.clone().detach().cpu().numpy()
-        on_levy = np.clip(np.floor(on_levy) + 1, 0, args.clip_n)
+        on_levy = np.floor(np.clip(on_levy,1, args.clip_n))
+        
         n_tracked.append(int(on_levy))
 
         if random.random() < epsilon:
@@ -1010,40 +1014,43 @@ for global_step in range(args.total_timesteps):
 #        print(s_n)
         with torch.no_grad():
             
-            # Get TD target
-            # zero indexing the output just returns the logits
-            target_max = torch.max(target_network.forward(s_next_obses, device)[0], dim=1)[0]
-            td_target = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
+            # Get TD target zero indexing the output just returns the logits target_max = torch.max(target_network.forward(s_next_obses, device)[0], dim=1)[0] td_target = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
             # get targets for n, either value based or latent embedding based             
             n_target = torch.zeros(len(s_len_trajs), requires_grad = False, device=device)
             if args.latent_target:
                 all_z_old = q_network.forward(s_all_states,device)[4]
                 all_targets, _,_,_, all_z_targets = target_network.forward(s_all_next_states,device)
-
+                all_targets = torch.max(all_targets,dim=1)[0]
                 len_traj_current = 0
-
+                
                 delta_z = all_z_targets-all_z_old 
                 delta_z_norms = torch.norm(delta_z, 2, dim = 1)      
                 value_loss_weighting = args.n_loss_weighting
                 n_target = torch.zeros(len(s_len_trajs), requires_grad = False, device=device)
-
-                value_loss = True
+                
+                
                 for idx, len_traj in enumerate(s_len_trajs):
+                    delta_z_norms_traj = delta_z_norms[len_traj_current:len_traj_current+len_traj] 
+                    #TODO investigate if norm should be of nondiscounted norms or not
+                    expected_z = delta_z_norms_traj.mean() 
+
                     # TODO check for off by one error
+                    if args.discount_latent_embedding:
+                        traj_discount = torch.tensor([args.gamma**i for i in range(len_traj)], requires_grad=False,device=device)
+                        delta_z_norms_traj = delta_z_norms_traj * traj_discount
+
                     if args.n_weighted:
-                        norm_factor = delta_z_norms[len_traj_current:len_traj_current+len_traj].sum() if len_traj > 0 else 1
-                        weights = delta_z_norms[len_traj_current:len_traj_current+len_traj] / norm_factor if len_traj > 0 else 1
+                        norm_factor = delta_z_norms_traj.sum() if len_traj > 0 else 1
+                        weights =  delta_z_norms_traj / norm_factor if len_traj > 0 else 1
                         weighted_n = weights * torch.arange(0,len_traj,device=device)
                         n_target[idx] += (1-value_loss_weighting)*weighted_n.sum()
 
                     if args.n_argmax:
-                        expected_z = delta_z[len_traj_current:len_traj_current+len_traj].mean() 
-                        n_target[idx] += torch.argmax(expected_z - delta_z[len_traj_current:len_traj_current+len_traj])  \
+                        n_target[idx] += torch.argmax(expected_z - delta_z_norms_traj)  \
                             if len_traj > 1 else 0 \
 
                     if args.n_sign_changes:
-                        expected_z = delta_z_norms[len_traj_current:len_traj_current+len_traj].mean() 
-                        z_expected_diff = expected_z - delta_z_norms[len_traj_current:len_traj_current+len_traj]
+                        z_expected_diff = expected_z - delta_z_norms_traj
                         #TODO potentually correct for symmetry
                         pos_actions =  (z_expected_diff <= 0).nonzero()
                         # safety net for rounding errors
@@ -1053,10 +1060,10 @@ for global_step in range(args.total_timesteps):
                             n_target[idx] += (1-value_loss_weighting)*pos_actions[-1].item() if len_traj > 1 else 0
                         
                     if args.value_loss:
-                        n_target[idx] += value_loss_weighting *torch.argmax(all_targets[len_traj_current:len_traj_current+len_traj])  \
-                            if len_traj > 1 else 0 \
+                        sub_traj = all_targets[len_traj_current:len_traj_current+len_traj]
+                        n_target[idx] += value_loss_weighting *torch.argmax(sub_traj)  \
+                            if len_traj > 1 else 0 
 
-                       # find sign changes
                     len_traj_current+=len_traj
                 
             else:
@@ -1156,7 +1163,7 @@ for global_step in range(args.total_timesteps):
                 # levy action selection logic
                 if on_levy == 0:
                     on_levy = n.clone().detach().cpu().numpy()
-                    on_levy = np.clip(np.floor(on_levy) + 1, 0, args.clip_n)
+                    on_levy = np.floor(np.clip(on_levy, 1, args.clip_n))
                     n_tracked_eval.append(on_levy)
                     current_levy_action = torch.argmax(logits, dim=1).tolist()[0]
 
