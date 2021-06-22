@@ -5,7 +5,7 @@ from collections import deque
 import gym
 import gym_minigrid
 from gym import spaces
-from gym_minigrid.wrappers import ImgObsWrapper
+from gym_minigrid.wrappers import ImgObsWrapper, FullyObsWrapper
 import cv2
 cv2.ocl.setUseOpenCL(False)
 
@@ -375,6 +375,7 @@ if __name__ == "__main__":
                         help="the frequency of training")
     parser.add_argument('--mu_net_coeff', type=float, default=3,
                         help="coefficent used for determining the init of mu net")
+    parser.add_argument('--fully_observable', type=bool, default=False,help="use full obs wrapper or not")
     args = parser.parse_args()
     if not args.seed:
         args.seed = int(time.time())
@@ -393,6 +394,10 @@ if args.prod_mode:
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
 env = gym.make(args.gym_id)
 #env = wrap_atari(env)
+
+if args.fully_observable:
+    env = FullyObsWrapper(env)
+    
 env = ImgObsWrapper(env)
 
 #env = gym.wrappers.RecordEpisodeStatistics(env) # records episode reward in `info['episode']['r']`
@@ -685,7 +690,6 @@ for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
     epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction*args.total_timesteps, global_step)
     obs = np.array(obs)
-    env.render()
    # action, logits, _,  = sampler.sample(q_network, obs, device, n, epsilon)
     logits = q_network.forward(obs.reshape((1,)+obs.shape), device)
     if random.random() < epsilon:

@@ -792,149 +792,7 @@ class QNetworkN(nn.Module):
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope =  (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
-
-class LevySampler(nn.Module):
-    def __init__(self, mu_max, scale_max, mu_min = 1, scale_min=1e-5):
-        super(LevySampler, self).__init__()
-        self.mu_min = mu_min
-        self.scale_min = scale_min
-        self.mu_max = mu_max
-        self.scale_max = scale_max
-
-    def forward(self, mu, scale, n_prev):
-        # reparam trick - use Gaussian sampling of Levy dist
-        # http://www.randomservices.org/random/special/Levy.html
-        # mu + scale * (cumInvNorm(1 - Uniform)^-2)
-
-        # use nonzero elements to create a batched mask 
-        batch_size = mu.shape[0]
-        noise = torch.tensor((norm.ppf(1-np.random.rand(batch_size))**-2), dtype=torch.float, device=mu.device)
-        noise = noise.unsqueeze(1)
-        mu = torch.clamp(mu, min=self.mu_min, max=self.mu_max)
-        scale = torch.clamp(scale, min=self.scale_min, max=self.scale_max)
-        n = mu + scale*noise
-        mask = torch.tensor([int(i > 0) for i in n_prev],device = mu.device)
-        mask = mask.unsqueeze(1)
-        n = n_prev*mask + n*(torch.ones_like(mask)-mask)
-        return n
-
-class QNetworkGuidedLevy(nn.Module):
-    def __init__(self, env, frames=3, mu_init=None):
-        super(QNetworkGuidedLevy, self).__init__()
-        n = env.observation_space.shape[0]
-        m = env.observation_space.shape[1]
-        self.linear_embedding_size = 64* ((n-1)//2 -2) * ((m-1)//2 - 2) 
-        print("Linear Embedding Size: ", self.linear_embedding_size)
-        self.embedding = nn.Sequential(
-            #Scale(1/255),
-            nn.Conv2d(frames, 16, (2,2) ),
-            nn.ReLU(),
-            nn.MaxPool2d((2,2)),
-            nn.Conv2d(16, 32, (2,2)),
-            nn.ReLU(),
-
-            nn.Conv2d(32, 64,(2,2)),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(self.linear_embedding_size, 512),
-            nn.ReLU()
-        )
-        self.q_head = nn.Linear(512 + 1, env.action_space.n)
-        # init mu head such that initial expected mu > mu_min
-
-        self.levy_mu_head = nn.Sequential(
-                             nn.Linear(512, 64),
-                             nn.Tanh(),
-                             nn.Linear(64, 1),
-                             nn.ReLU()
-                             )
-        if mu_init is not None:
-            for m in self.levy_mu_head.modules():
-                if isinstance(m, nn.Linear):
-                    nn.init.normal(m.weight, mean=mu_init/512, std=0.1)
-                    nn.init.constant(m.bias, 512/128)
-
-        self.levy_scale_head = nn.Sequential(
-                             nn.Linear(512, 64),
-                             nn.Tanh(),
-                             nn.Linear(64, 1)
-                             #nn.ReLU()
-                             )
-        self.action_repeat_sampler = LevySampler(10, 100) # TODO add as argparse params
-
-    # TODO concat (n, n_t) as option instead of jst n 
-    # TODO choices for concat
-    # n for all time steps, gradient does not flow in time but jsut from t to 0
-    # tuple n, n_t
-    # n - t', where t' is relative time in sub trajectory, could be better for generalisation
-    # 
-    def forward(self, x,n_prev, device, initiate = False):
-        x = np.swapaxes(x,1,3)
-        #x = x.transpose(1,3).transpose(2,3)
-        # x = x.contiguous()
-
-        x = torch.Tensor(x).to(device)
-        z = self.embedding(x)
-        if self.condition:
-            pass 
-        else:
-
-            mu = self.levy_mu_head(z)
-            scale = self.levy_scale_head(z)
-            # will return sample only if n_prev is zeros
-            n_out = self.action_repeat_sampler(mu, scale, n_prev)
-            z = torch.cat([z, n_out], dim = 1)
-            q = self.q_head(z)
-
-        return q, z, n_out, mu, scale
- 
-class Sampler():
-    def __init__(self, env, use_eps_greedy = True):
-        self.use_eps_greedy = use_eps_greedy
-        self.action_space = env.action_space
-        self.on_traj = False
-        self.current_traj_length = 0
-        self.final_traj_length = 0 
-        self.current_action = 0 
-
-    def sample(self, network, obs, device, n, eps):
-        # take in a network and observation
-        # want to keep track of levy logic within sampler
-        # return n logits and action 
-        # need n for storing in replay buffer 
-
-        if self.on_traj:
-            # action is the current action but still need
-            # to generate logits 
-            action = self.current_action
-            logits, z, n_out, mu, scale = network.forward(obs.reshape((1,)+obs.shape), n, device, initiate=False)
-            #TODO decide if to store n locally
-            self.current_traj_length = self.current_traj_length + 1
-            if self.current_traj_length == self.final_traj_length:
-                self.current_traj_length = 0 
-                self.final_traj_length = 0
-                self.on_traj = False
-                n_out = torch.zeros((1,1))
-
-        else:
-            logits, z, n_out, mu, scale = network.forward(obs.reshape((1,)+obs.shape), n,  device, initiate=True)
-            # the n here is the n we want to concat to future passes
-            # clip, floor and store a detached version for logic
-            self.final_traj_length = n.clone().detach().cpu().numpy()
-            self.final_traj_length = np.floor(self.final_traj_length)
-            action = torch.argmax(logits, dim=1).tolist()[0]
-            if self.final_traj_length > 1:
-                self.on_traj = True
-                self.current_traj_length = 1
-
-
-        if self.use_eps_greedy:
-            rand_num = random.random()
-            if rand_num < eps:
-                action = self.action_space.sample() 
-
-        return action, logits,z, n_out, mu, scale
-    
+   
 rb = ReplayBufferNStepLevy(args.buffer_size,  args.gamma)
 q_network = QNetworkN(env)
 #q_network = nn.DataParallel(q_network)
@@ -946,7 +804,6 @@ target_network = target_network.to(device)
 
 target_network.load_state_dict(q_network.state_dict())
 
-sampler = Sampler(env)
 
 optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
 loss_fn = nn.MSELoss()
@@ -976,6 +833,11 @@ scale_lower = 0.0
 scale_higher = 0.1
 
 eval_flag = False
+
+def calc_loss_weighting(flags: list):
+    weight = sum(flags)
+    #TODO raise value error
+    return weight**-1 if weight > 0 else ValueError("Please specify a loss")
 
 for global_step in range(args.total_timesteps):
     # ALGO LOGIC: put action logic here
@@ -1014,7 +876,9 @@ for global_step in range(args.total_timesteps):
 #        print(s_n)
         with torch.no_grad():
             
-            # Get TD target zero indexing the output just returns the logits target_max = torch.max(target_network.forward(s_next_obses, device)[0], dim=1)[0] td_target = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
+            # Get TD target zero indexing the output just returns the logits 
+            target_max = torch.max(target_network.forward(s_next_obses, device)[0], dim=1)[0] 
+            td_target = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
             # get targets for n, either value based or latent embedding based             
             n_target = torch.zeros(len(s_len_trajs), requires_grad = False, device=device)
             if args.latent_target:
@@ -1025,47 +889,42 @@ for global_step in range(args.total_timesteps):
                 
                 delta_z = all_z_targets-all_z_old 
                 delta_z_norms = torch.norm(delta_z, 2, dim = 1)      
-                value_loss_weighting = args.n_loss_weighting
+                value_loss_override = False
+                if value_loss_override:
+                    value_loss_weighting = args.n_loss_weighting
+                else:
+                    value_loss_weighting = calc_loss_weighting([args.n_weighted, args.n_argmax, args.n_sign_changes, args.value_loss])
+                    
                 n_target = torch.zeros(len(s_len_trajs), requires_grad = False, device=device)
+               
+                delta_z_norms = torch.split(delta_z_norms, list(s_len_trajs))
+                all_targets = torch.split(all_targets, list(s_len_trajs)) 
                 
+                if args.discount_latent_embedding:
+                    delta_z_norms = (traj * torch.tensor([args.gamma**i for i in range(len(traj))], device=device) for traj in delta_z_norms )
+
+                if args.n_weighted:
+                    for idx, traj in enumerate(delta_z_norms):
+                        n_target[idx] += ((value_loss_weighting)*traj * torch.arange(0, len(traj), device=device)).mean()
+
+                if args.n_argmax:
+                    for idx, traj in enumerate(delta_z_norms):
+                        expected_z = traj.mean()
+                        n_target[idx] += (value_loss_weighting)*torch.argmax(expected_z - traj) if len(traj) > 1 else 0
                 
-                for idx, len_traj in enumerate(s_len_trajs):
-                    delta_z_norms_traj = delta_z_norms[len_traj_current:len_traj_current+len_traj] 
-                    #TODO investigate if norm should be of nondiscounted norms or not
-                    expected_z = delta_z_norms_traj.mean() 
-
-                    # TODO check for off by one error
-                    if args.discount_latent_embedding:
-                        traj_discount = torch.tensor([args.gamma**i for i in range(len_traj)], requires_grad=False,device=device)
-                        delta_z_norms_traj = delta_z_norms_traj * traj_discount
-
-                    if args.n_weighted:
-                        norm_factor = delta_z_norms_traj.sum() if len_traj > 0 else 1
-                        weights =  delta_z_norms_traj / norm_factor if len_traj > 0 else 1
-                        weighted_n = weights * torch.arange(0,len_traj,device=device)
-                        n_target[idx] += (1-value_loss_weighting)*weighted_n.sum()
-
-                    if args.n_argmax:
-                        n_target[idx] += torch.argmax(expected_z - delta_z_norms_traj)  \
-                            if len_traj > 1 else 0 \
-
-                    if args.n_sign_changes:
-                        z_expected_diff = expected_z - delta_z_norms_traj
-                        #TODO potentually correct for symmetry
-                        pos_actions =  (z_expected_diff <= 0).nonzero()
-                        # safety net for rounding errors
+                if args.n_sign_changes:
+                    for idx, traj in enumerate(delta_z_norms):
+                        expected_z = traj.mean()
+                        pos_actions = (expected_z - traj < 0).nonzero()
                         if pos_actions.shape == (0,1):
-                            n_target[idx] += (1-value_loss_weighting)*len_traj
+                            # safety net for rounding errors
+                            n_target[idx] += len(traj)
                         else:
-                            n_target[idx] += (1-value_loss_weighting)*pos_actions[-1].item() if len_traj > 1 else 0
-                        
-                    if args.value_loss:
-                        sub_traj = all_targets[len_traj_current:len_traj_current+len_traj]
-                        n_target[idx] += value_loss_weighting *torch.argmax(sub_traj)  \
-                            if len_traj > 1 else 0 
-
-                    len_traj_current+=len_traj
-                
+                            n_target[idx] += (value_loss_weighting)*pos_actions[-1].item() if len(traj) > 1 else 0
+                if args.value_loss:
+                    for idx, traj in enumerate(all_targets):
+                        n_target[idx] += value_loss_weighting *torch.argmax(traj)  \
+                            if len(traj) > 1 else 0 
             else:
 
                 all_targets = target_network.forward(s_all_next_states, device)[0] 
