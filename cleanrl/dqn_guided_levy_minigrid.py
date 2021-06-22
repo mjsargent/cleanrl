@@ -328,6 +328,7 @@ from scipy.stats import norm
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='DQN agent')
     # Common arguments
+    parser.add_argument('--save_model', type=bool, default=False,help="save the network state dict")
     parser.add_argument('--exp_name', type=str, default=os.path.basename(__file__).rstrip(".py"),
                         help='the name of this experiment')
     parser.add_argument('--gym_id', type=str, default="MiniGrid-FourRooms-v0",
@@ -1051,4 +1052,9 @@ for global_step in range(args.total_timesteps):
             on_levy = 0 
 
 env.close()
+
+if args.save_model:
+    os.makedirs(f"./models/{args.gym_id}/{wandb.run.id}", exist_ok=True)
+    torch.save(q_network.state_dict(), f"./models/{args.gym_id}/{wandb.run.id}/model.pth")
+
 writer.close()
