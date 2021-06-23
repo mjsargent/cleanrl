@@ -895,7 +895,7 @@ for global_step in range(args.total_timesteps):
                     value_loss_weighting = args.n_loss_weighting
                 else:
                     value_loss_weighting = calc_loss_weighting([args.n_weighted, args.n_argmax, args.n_sign_changes, args.value_loss])
-                    
+
                 n_target = torch.zeros(len(s_len_trajs), requires_grad = False, device=device)
                
                 delta_z_norms = torch.split(delta_z_norms, list(s_len_trajs))
@@ -907,21 +907,28 @@ for global_step in range(args.total_timesteps):
                 if args.n_weighted:
                     for idx, traj in enumerate(delta_z_norms):
                         n_target[idx] += ((value_loss_weighting)*traj * torch.arange(0, len(traj), device=device)).mean()
+                       # print("|| n weighted", ((value_loss_weighting)*traj * torch.arange(0, len(traj), device=device)).mean())
+                        #print("Target greater than max traj length:")
+                        #print("traj: ", traj)
+                        #print("traj shape: ", traj.shape)
+                        
 
                 if args.n_argmax:
                     for idx, traj in enumerate(delta_z_norms):
                         expected_z = traj.mean()
                         n_target[idx] += (value_loss_weighting)*torch.argmax(expected_z - traj) if len(traj) > 1 else 0
-                
+                                        
                 if args.n_sign_changes:
                     for idx, traj in enumerate(delta_z_norms):
                         expected_z = traj.mean()
                         pos_actions = (expected_z - traj < 0).nonzero()
                         if pos_actions.shape == (0,1):
                             # safety net for rounding errors
-                            n_target[idx] += len(traj)
+                            n_target[idx] += value_loss_weighting*len(traj)
                         else:
                             n_target[idx] += (value_loss_weighting)*pos_actions[-1].item() if len(traj) > 1 else 0
+
+                             
                 if args.value_loss:
                     for idx, traj in enumerate(all_targets):
                         n_target[idx] += value_loss_weighting *torch.argmax(traj)  \
