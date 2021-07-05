@@ -916,6 +916,7 @@ for global_step in range(args.total_timesteps):
                 if args.n_argmax:
                     for idx, traj in enumerate(delta_z_norms):
                         expected_z = traj.mean()
+                        print(torch.argmax(expected_z - traj))
                         n_target[idx] += (value_loss_weighting)*torch.argmax(expected_z - traj) if len(traj) > 1 else 0
                                         
                 if args.n_sign_changes:
@@ -931,6 +932,7 @@ for global_step in range(args.total_timesteps):
                              
                 if args.value_loss:
                     for idx, traj in enumerate(all_targets):
+                        print(torch.argmax(traj))
                         n_target[idx] += value_loss_weighting *torch.argmax(traj)  \
                             if len(traj) > 1 else 0 
             else:
