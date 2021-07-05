@@ -1,4 +1,4 @@
-# https://github.com/facebookresearch/torchbeast/blob/master/torchbeast/core/environment.py
+#- https://github.com/facebookresearch/torchbeast/blob/master/torchbeast/core/environment.py
 import numpy as np
 from collections import deque
 import gym
@@ -394,7 +394,7 @@ if __name__ == "__main__":
     parser.add_argument("--value_conditioning", type=bool, default=False, help= "condition the action repeat on the current value estimate")
     parser.add_argument("--n_loss_weighting", type=float, default=0.5, help= "weightings of the value based and embedding based losses")
     parser.add_argument("--discount_latent_embedding", type=bool, default=1, help= "discount along the trajectories")
-
+    parser.add_argument("--scale_override",type=int, default=-1)
     
     args = parser.parse_args()
     if not args.seed:
@@ -709,7 +709,7 @@ class LevyHead(nn.Module):
 
     def forward(self, mu, scale, use_noise = True):
         batch_size = mu.shape[0] 
-        noise = torch.tensor((norm.ppf(1-np.random.rand(batch_size))**-2), dtype=torch.float, device=mu.device, requires_grad=False) 
+        noise = torch.tensor((norm.ppf(1-np.random.rand(batch_size))**-2), dtype=torch.float, device=mu.device) 
         noise = noise.unsqueeze(1)  
         scale = torch.clamp(scale, min=0, max=0.1)                                                                           
         n = mu + scale * int(use_noise)*noise 
@@ -721,7 +721,7 @@ def layer_init(layer,std=np.sqrt(2),bias_const=0.0):
     return layer
 
 class QNetworkN(nn.Module):
-    def __init__(self, env, frames=3, condition=False):
+    def __init__(self, env, frames=3, condition=False, scale_override=-1):
         super(QNetworkN, self).__init__()
         n = env.observation_space.shape[0]
         m = env.observation_space.shape[1]
@@ -730,6 +730,7 @@ class QNetworkN(nn.Module):
         print(self.linear_embedding_size)
         self.condition = condition
         self.latent_dim = 512 + env.action_space.n if self.condition else 512
+        self.scale_override = scale_override
         self.embedding = nn.Sequential(
             Scale(1/255),
             layer_init(nn.Conv2d(frames, 16, (2,2))),
@@ -760,7 +761,7 @@ class QNetworkN(nn.Module):
         self.levy_head = LevyHead()
 
         self.n_head = layer_init(nn.Linear(self.latent_dim, 1))
-
+        
     def forward(self, x, device, use_noise=True):
         x = np.swapaxes(x,1,3)
 
@@ -773,7 +774,7 @@ class QNetworkN(nn.Module):
             # detach q as well?
             z_n = torch.cat([z_n,q], axis = 1)
             mu = self.mu_head(z_n)
-            scale = self.scale_head(z_n)
+            scale = self.scale_head(z_n) if self.scale_override > -1 else self.scale_override
             n = self.levy_head(mu, scale)
 
         else:
@@ -795,11 +796,11 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     return max(slope * t + start_e, end_e)
    
 rb = ReplayBufferNStepLevy(args.buffer_size,  args.gamma)
-q_network = QNetworkN(env)
+q_network = QNetworkN(env, scale_override=args.scale_override)
 #q_network = nn.DataParallel(q_network)
 q_network = q_network.to(device)
 
-target_network = QNetworkN(env)
+target_network = QNetworkN(env, scale_override=args.scale_override)
 #target_network = nn.DataParallel(target_network)
 target_network = target_network.to(device)
 
@@ -882,75 +883,63 @@ for global_step in range(args.total_timesteps):
             td_target = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
             # get targets for n, either value based or latent embedding based             
             n_target = torch.zeros(len(s_len_trajs), requires_grad = False, device=device)
+            all_targets, _,_,_, all_z_targets = target_network.forward(s_all_next_states,device)
+            all_targets = torch.max(all_targets,dim=1)[0]
+            len_traj_current = 0
+            
             if args.latent_target:
                 all_z_old = q_network.forward(s_all_states,device)[4]
-                all_targets, _,_,_, all_z_targets = target_network.forward(s_all_next_states,device)
-                all_targets = torch.max(all_targets,dim=1)[0]
-                len_traj_current = 0
-                
                 delta_z = all_z_targets-all_z_old 
-                delta_z_norms = torch.norm(delta_z, 2, dim = 1)      
-                value_loss_override = False
-                if value_loss_override:
-                    value_loss_weighting = args.n_loss_weighting
-                else:
-                    value_loss_weighting = calc_loss_weighting([args.n_weighted, args.n_argmax, args.n_sign_changes, args.value_loss])
-
-                n_target = torch.zeros(len(s_len_trajs), requires_grad = False, device=device)
-               
-                delta_z_norms = torch.split(delta_z_norms, list(s_len_trajs))
-                all_targets = torch.split(all_targets, list(s_len_trajs)) 
-                
-                if args.discount_latent_embedding:
-                    delta_z_norms = (traj * torch.tensor([args.gamma**i for i in range(len(traj))], device=device) for traj in delta_z_norms )
-
-                if args.n_weighted:
-                    for idx, traj in enumerate(delta_z_norms):
-                        n_target[idx] += ((value_loss_weighting)*traj * torch.arange(0, len(traj), device=device)).mean()
-                       # print("|| n weighted", ((value_loss_weighting)*traj * torch.arange(0, len(traj), device=device)).mean())
-                        #print("Target greater than max traj length:")
-                        #print("traj: ", traj)
-                        #print("traj shape: ", traj.shape)
-                        
-
-                if args.n_argmax:
-                    for idx, traj in enumerate(delta_z_norms):
-                        expected_z = traj.mean()
-                        print(torch.argmax(expected_z - traj))
-                        n_target[idx] += (value_loss_weighting)*torch.argmax(expected_z - traj) if len(traj) > 1 else 0
-                                        
-                if args.n_sign_changes:
-                    for idx, traj in enumerate(delta_z_norms):
-                        expected_z = traj.mean()
-                        pos_actions = (expected_z - traj < 0).nonzero()
-                        if pos_actions.shape == (0,1):
-                            # safety net for rounding errors
-                            n_target[idx] += value_loss_weighting*len(traj)
-                        else:
-                            n_target[idx] += (value_loss_weighting)*pos_actions[-1].item() if len(traj) > 1 else 0
-
-                             
-                if args.value_loss:
-                    for idx, traj in enumerate(all_targets):
-                        print(torch.argmax(traj))
-                        n_target[idx] += value_loss_weighting *torch.argmax(traj)  \
-                            if len(traj) > 1 else 0 
             else:
+                delta_z = s_all_next_states.reshape(s_all_next_states.shape[0], -1) - s_all_states.reshape(s_all_states.shape[0], -1)
 
-                all_targets = target_network.forward(s_all_next_states, device)[0] 
+            delta_z_norms = torch.norm(delta_z, 2, dim = 1)      
 
-                # quick and dirty loop; I just can't get my head around doing this with torch indexing function rn
-                len_traj_current = 0
+            value_loss_override = False
+            if value_loss_override:
+                value_loss_weighting = args.n_loss_weighting
+            else:
+                value_loss_weighting = calc_loss_weighting([args.n_weighted, args.n_argmax, args.n_sign_changes, args.value_loss])
 
-                n_target = torch.zeros(len(s_len_trajs), requires_grad = False, device=device)
+            n_target = torch.zeros(len(s_len_trajs), requires_grad = False, device=device)
+           
+            delta_z_norms = torch.split(delta_z_norms, list(s_len_trajs))
+            all_targets = torch.split(all_targets, list(s_len_trajs)) 
+            
+            if args.discount_latent_embedding:
+                delta_z_norms = (traj * torch.tensor([args.gamma**i for i in range(len(traj))], device=device) for traj in delta_z_norms )
 
-                for idx, len_traj in enumerate(s_len_trajs):
-                # +1 or not to +1 - think about the floor func. if n_out = 1, on_levy = 2 therefor taking two actions on this levy therfore not +1
-                    n_target[idx] = torch.argmax(all_targets[len_traj_current:len_traj_current+len_traj])  \
-                        if len_traj > 1 else 0 \
-                        
-                    len_traj_current+=len_traj
-                
+            if args.n_weighted:
+                for idx, traj in enumerate(delta_z_norms):
+                    n_target[idx] += ((value_loss_weighting)*traj * torch.arange(0, len(traj), device=device)).mean()
+                   # print("|| n weighted", ((value_loss_weighting)*traj * torch.arange(0, len(traj), device=device)).mean())
+                    #print("Target greater than max traj length:")
+                    #print("traj: ", traj)
+                    #print("traj shape: ", traj.shape)
+                    
+
+            if args.n_argmax:
+                for idx, traj in enumerate(delta_z_norms):
+                    expected_z = traj.mean()
+                    n_target[idx] += (value_loss_weighting)*torch.argmax(expected_z - traj) if len(traj) > 1 else 0
+                                    
+            if args.n_sign_changes:
+                for idx, traj in enumerate(delta_z_norms):
+                    expected_z = traj.mean()
+                    pos_actions = (expected_z - traj < 0).nonzero()
+                    if pos_actions.shape == (0,1):
+                        # safety net for rounding errors
+                        n_target[idx] += value_loss_weighting*len(traj)
+                    else:
+                        n_target[idx] += (value_loss_weighting)*pos_actions[-1].item() if len(traj) > 1 else 0
+
+                         
+            if args.value_loss:
+                for idx, traj in enumerate(all_targets):
+                    print(torch.argmax(traj))
+                    n_target[idx] += value_loss_weighting *torch.argmax(traj)  \
+                        if len(traj) > 1 else 0 
+               
         # need to write function here to get the argmax of these values for each sub trajectory
         # when storing n, does it need to be stored before being passed through
         old_val, _, old_mu, old_scale, _ = q_network.forward(s_obs, device)
