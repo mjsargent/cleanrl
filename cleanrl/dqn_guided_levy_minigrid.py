@@ -921,7 +921,7 @@ for global_step in range(args.total_timesteps):
             if args.n_argmax:
                 for idx, traj in enumerate(delta_z_norms):
                     expected_z = traj.mean()
-                    n_target[idx] += (value_loss_weighting)*torch.argmax(expected_z - traj) if len(traj) > 1 else 0
+                    n_target[idx] += (value_loss_weighting)*torch.argmax(expected_z - traj) if len(traj) > 1 else 1
                                     
             if args.n_sign_changes:
                 for idx, traj in enumerate(delta_z_norms):
@@ -931,15 +931,18 @@ for global_step in range(args.total_timesteps):
                         # safety net for rounding errors
                         n_target[idx] += value_loss_weighting*len(traj)
                     else:
-                        n_target[idx] += (value_loss_weighting)*pos_actions[-1].item() if len(traj) > 1 else 0
+                        n_target[idx] += (value_loss_weighting)*pos_actions[-1].item() if len(traj) > 1 else 1
 
                          
             if args.value_loss:
                 for idx, traj in enumerate(all_targets):
-                    print(torch.argmax(traj))
                     n_target[idx] += value_loss_weighting *torch.argmax(traj)  \
-                        if len(traj) > 1 else 0 
-               
+                        if len(traj) > 1 else 1
+
+        total_traj_lengths = torch.tensor([len(traj) for traj in all_targets])
+            
+        wandb.log({"losses/n_target": wandb.Histogram(n_target.cpu())}, step=global_step)
+        wandb.log({"losses/traj_lengths": wandb.Histogram(total_traj_lengths.cpu())}, step=global_step)
         # need to write function here to get the argmax of these values for each sub trajectory
         # when storing n, does it need to be stored before being passed through
         old_val, _, old_mu, old_scale, _ = q_network.forward(s_obs, device)
