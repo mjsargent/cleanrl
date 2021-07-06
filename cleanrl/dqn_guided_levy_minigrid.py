@@ -394,7 +394,7 @@ if __name__ == "__main__":
     parser.add_argument("--value_conditioning", type=bool, default=False, help= "condition the action repeat on the current value estimate")
     parser.add_argument("--n_loss_weighting", type=float, default=0.5, help= "weightings of the value based and embedding based losses")
     parser.add_argument("--discount_latent_embedding", type=bool, default=1, help= "discount along the trajectories")
-    parser.add_argument("--scale_override",type=int, default=-1)
+    parser.add_argument("--scale_override",type=float, default=-1)
     
     args = parser.parse_args()
     if not args.seed:
