@@ -941,8 +941,6 @@ for global_step in range(args.total_timesteps):
 
         total_traj_lengths = torch.tensor([len(traj) for traj in all_targets])
             
-        wandb.log({"losses/n_target": wandb.Histogram(n_target.cpu())}, step=global_step)
-        wandb.log({"losses/traj_lengths": wandb.Histogram(total_traj_lengths.cpu())}, step=global_step)
         # need to write function here to get the argmax of these values for each sub trajectory
         # when storing n, does it need to be stored before being passed through
         old_val, _, old_mu, old_scale, _ = q_network.forward(s_obs, device)
@@ -969,6 +967,10 @@ for global_step in range(args.total_timesteps):
             writer.add_scalar("charts/avg_n", avg_n, global_step)
             writer.add_scalar("charts/avg_scale", avg_scale, global_step)
             writer.add_scalar("charts/last_target_n", int(n_target[0].item()))
+
+            wandb.log({"losses/n_target": wandb.Histogram(n_target.cpu())}, step=global_step)
+            wandb.log({"losses/traj_lengths": wandb.Histogram(total_traj_lengths.cpu())}, step=global_step)
+
             n_tracked = []
             scale_tracked = []
 
