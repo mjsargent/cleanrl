@@ -379,9 +379,9 @@ if __name__ == "__main__":
                               help = "number of steps used in nstep return")
     parser.add_argument("--fully_observable", type=bool, default=False,
                         help="use the fully observable env wrapper")
-    parser.add_argument("--clip_n", type = int, default = 100, 
+    parser.add_argument("--clip_n", type = int, default = 25, 
                         help="maximum number of action repeats")
-    parser.add_argument('--eval_frequency', type=int, default=5000,
+    parser.add_argument('--eval_frequency', type=int, default=100000,
                         help="the frequency of noiseless eval")
     # n network losses
     parser.add_argument("--obs_target", type=bool, default=False, help="use norm of the observations as a target")
@@ -395,6 +395,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_loss_weighting", type=float, default=0.5, help= "weightings of the value based and embedding based losses")
     parser.add_argument("--discount_latent_embedding", type=bool, default=1, help= "discount along the trajectories")
     parser.add_argument("--scale_override",type=float, default=-1)
+    parser.add_argument("--pri_by_length", type=bool, help="prioiritise samples based on trajectory length", default=False)
     
     args = parser.parse_args()
     if not args.seed:
@@ -405,12 +406,16 @@ experiment_name = f"{args.gym_id}__{args.exp_name}__{args.seed}__{int(time.time(
 writer = SummaryWriter(f"runs/{experiment_name}")
 writer.add_text('hyperparameters', "|param|value|\n|-|-|\n%s" % (
         '\n'.join([f"|{key}|{value}|" for key, value in vars(args).items()])))
+
 if args.prod_mode:
     import wandb
     wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, sync_tensorboard=True, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
+    #wandb.tensorboard.patch(root_logdir=".")
+    #wandb.init(project=args.wandb_project_name, entity=args.wandb_entity, config=vars(args), name=experiment_name, monitor_gym=True, save_code=True)
     writer = SummaryWriter(f"/tmp/{experiment_name}")
 
-# TRY NOT TO MODIFY: seeding
+
+#TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
 env = gym.make(args.gym_id)
 #env = wrap_atari(env)
@@ -563,11 +568,14 @@ class ReplayBufferNStepVariable():
             self.buffer.append((state, action, R ,last_obs, True))
 
 class ReplayBufferNStepLevy():
-    def __init__(self, buffer_limit, gamma):
+    def __init__(self, buffer_limit, gamma, pri = False):
         self.buffer = collections.deque(maxlen=buffer_limit)
         self.nstep_buffer = [] 
         self.nsteps = None
         self.gamma = gamma
+        self.pri = pri
+        if self.pri:
+            self.buffer_weights = collections.deque(maxlen=buffer_limit)
 
     def put(self, transition, n):
         self.nstep_buffer.append(transition)
@@ -579,6 +587,7 @@ class ReplayBufferNStepLevy():
             return
         
         # once we hit n, drain the buffer and take a new n
+
         while len(self.nstep_buffer) > 0:
 
             len_traj = len(self.nstep_buffer)
@@ -588,11 +597,17 @@ class ReplayBufferNStepLevy():
             first_state , action, _, _, _ = self.nstep_buffer.pop(0)
             # keep seperatre cache of states and next stats for each drain; do a seperate pass of the next obs
             self.buffer.append((first_state, action, R,transition[3] ,transition[4], len_traj, np.stack(all_states, axis=0), np.stack(all_next_states, axis=0)))
+            if self.pri:
+                self.buffer_weights.append(len_traj)
 
         self.nsteps = n
 
     def sample(self, n):
-        mini_batch = random.sample(self.buffer, n)
+        if self.pri:
+            mini_batch = random.choices(self.buffer, weights =  self.buffer_weights, k = n)
+        else:
+            mini_batch = random.sample(self.buffer, n)
+
         s_lst, a_lst, r_lst, s_prime_lst, done_mask_lst, len_traj_lst,  all_states_lst, all_next_states_lst  = [], [], [], [], [], [], [], []
         for transition in mini_batch:
             s, a, r, s_prime, done_mask, len_traj,  all_states, all_next_states= transition
@@ -629,6 +644,9 @@ class ReplayBufferNStepLevy():
 
             first_state, action, _, _, _= self.nstep_buffer.pop(0)
             self.buffer.append((first_state, action, R, last_obs ,True, len_traj, np.stack(all_states, axis=0), np.stack(all_next_states, axis=0)))
+            
+            if self.pri:
+                self.buffer_weights.append(len_traj)
 
 
 class ReplayBufferActRepeat():
@@ -795,7 +813,7 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope =  (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
    
-rb = ReplayBufferNStepLevy(args.buffer_size,  args.gamma)
+rb = ReplayBufferNStepLevy(args.buffer_size,  args.gamma, pri=args.pri_by_length)
 q_network = QNetworkN(env, scale_override=args.scale_override)
 #q_network = nn.DataParallel(q_network)
 q_network = q_network.to(device)
@@ -876,13 +894,13 @@ for global_step in range(args.total_timesteps):
     if global_step > args.learning_starts and global_step % args.train_frequency == 0:
         s_obs, s_actions, s_rewards, s_next_obses, s_dones,s_len_trajs, s_all_states, s_all_next_states = rb.sample(args.batch_size)
 #        print(s_n)
+        n_target = torch.zeros(len(s_len_trajs), device=device)
         with torch.no_grad():
             
             # Get TD target zero indexing the output just returns the logits 
             target_max = torch.max(target_network.forward(s_next_obses, device)[0], dim=1)[0] 
             td_target = torch.Tensor(s_rewards).to(device) + args.gamma * target_max * (1 - torch.Tensor(s_dones).to(device))
             # get targets for n, either value based or latent embedding based             
-            n_target = torch.zeros(len(s_len_trajs), requires_grad = False, device=device)
             all_targets, _,_,_, all_z_targets = target_network.forward(s_all_next_states,device)
             all_targets = torch.max(all_targets,dim=1)[0]
             len_traj_current = 0
@@ -950,7 +968,9 @@ for global_step in range(args.total_timesteps):
 
         with torch.no_grad():
             scale_target = torch.where(old_mu.squeeze(1) < n_target, scale_higher, scale_lower)
-        
+        target_override = False
+        if target_override:
+            n_target = 10*torch.ones(len(s_len_trajs), device=device)
         # calc losses
         loss = loss_fn(td_target, old_val)
         n_loss = loss_fn_n(n_target, old_mu.squeeze(1)) 
@@ -959,20 +979,21 @@ for global_step in range(args.total_timesteps):
         
         # logging
         if global_step % 100 == 0:
-            writer.add_scalar("losses/td_loss", loss, global_step) 
-            writer.add_scalar("losses/n_loss", n_loss, global_step)
-
-            avg_n = np.mean(n_tracked)
-            avg_scale = np.mean(scale_tracked)
-            writer.add_scalar("charts/avg_n", avg_n, global_step)
-            writer.add_scalar("charts/avg_scale", avg_scale, global_step)
-            writer.add_scalar("charts/last_target_n", int(n_target[0].item()))
-
             wandb.log({"losses/n_target": wandb.Histogram(n_target.cpu())}, step=global_step)
             wandb.log({"losses/traj_lengths": wandb.Histogram(total_traj_lengths.cpu())}, step=global_step)
 
-            n_tracked = []
-            scale_tracked = []
+        writer.add_scalar("losses/td_loss", loss, global_step) 
+        writer.add_scalar("losses/n_loss", n_loss, global_step)
+
+        avg_n = np.mean(n_tracked)
+        avg_scale = np.mean(scale_tracked)
+        writer.add_scalar("charts/avg_n", avg_n, global_step)
+        writer.add_scalar("charts/avg_scale", avg_scale, global_step)
+        writer.add_scalar("charts/last_target_n", int(n_target[0].item()))
+
+
+        n_tracked = []
+        scale_tracked = []
 
         # optimize the model
         optimizer.zero_grad()
@@ -1018,28 +1039,94 @@ for global_step in range(args.total_timesteps):
             eval_episode_reward = 0
             n_tracked_eval = []
             mu_tracked_eval = []
+            obs_chain = []
             # do eval loop
+            # store obs, latent embeddings along the way, action taken, target n at the end
+
+            first_row_done= False
+            n_options = 0
+            eval_table_columns = ["obs","obs norms", "latent norms", "action", "n", "n target"]
+            eval_table = wandb.Table(columns = eval_table_columns, allow_mixed_types=False)
             while not eval_done:
-                logits, n, mu,_, _ = q_network.forward(obs.reshape((1,)+obs.shape), device, use_noise = False)
-                 
-                mu_tracked_eval.append(float(mu))
-                # levy action selection logic
-                if on_levy == 0:
-                    on_levy = n.clone().detach().cpu().numpy()
-                    on_levy = np.floor(np.clip(on_levy, 1, args.clip_n))
-                    n_tracked_eval.append(on_levy)
-                    current_levy_action = torch.argmax(logits, dim=1).tolist()[0]
+                with torch.no_grad():
+                    logits, n, mu, sc, z = q_network.forward(obs.reshape((1,)+obs.shape), device, use_noise = True)
+                    mu_tracked_eval.append(float(mu))
+                    # levy action selection logic
+                    if on_levy == 0:
+                        # log data to table
+                        on_levy = n.clone().detach().cpu().numpy()
+                        on_levy = np.floor(np.clip(on_levy, 1, args.clip_n))
 
-                if on_levy > 0:
-                    action = current_levy_action
-                else:
-                    action = torch.argmax(logits, dim=1).tolist()[0]
+                        #if first_row_done and n_options % 3 == 0:
+                        if first_row_done:
+                            #concat final obs 
+                            obs_chain.append(obs_rgb)
+                            last_z = q_network.forward(obs.reshape((1,)+obs.shape), device, use_noise = True)[4]
+                            latents.append(last_z.cpu().numpy())
+                            
+                            delta_z = [latents[i+1] - latents[i] for i in range(len(latents) - 1)]
+                            norms = [float(np.linalg.norm(i, 2)) for i in delta_z] 
+                            delta_obs = [obs_chain[i+1].flatten() - obs_chain[i].flatten() for i in range(len(obs_chain)-1)]
+                            norms_obs = [float(np.linalg.norm(i, 2)) for i in delta_obs] 
+                            eval_n_target = np.argmax(norms)
 
-                on_levy = on_levy - 1 
-                
-                # take a step
-                obs, reward, eval_done, info = env.step(action)
-                eval_episode_reward += reward
+                            eval_logging_key = f"eval_trajectories_n_{global_step}_option_{n_options}_"
+                            #eval_table.add_data(wandb.Image(np.concatenate(obs_chain)),latents, norms_obs, norms, int(current_levy_action),int(n_tracked_eval[-1]), int(eval_n_target )) 
+                            eval_table.add_data(wandb.Image(np.concatenate(obs_chain)), norms_obs, norms, int(current_levy_action),int(n_tracked_eval[-1]), int(eval_n_target )) 
+
+                            """
+                            eval_trajectories.add(wandb.Video(np.stack(obs_chain),fps=1), f"option_{n_options}/obs")
+                            for k, lat in enumerate(latents):
+                                eval_trajectories.add(wandb.Table(columns=["latents"],rows=[lat], allow_mixed_types=True), f"option_{n_options}/latent_histo")
+                            eval_trajectories.add(wandb.Table(columns=[i for i in range(len(norms))],rows=[norms], allow_mixed_types=True), f"option_{n_options}/norms")
+                            eval_trajectories.add(wandb.Table(columns=[i for i in range(len(traj_rewards))],rows=[traj_rewards], allow_mixed_types=True),f"option_{n_options}/rewards")
+                            eval_trajectories.add(wandb.Table(columns=["actions"],rows=[[current_levy_action]], allow_mixed_types=True),f"option_{n_options}/action")
+                            eval_trajectories.add(wandb.Table(columns=["n"],rows=[[n_tracked_eval[-1]]], allow_mixed_types=True),f"option_{n_options}/n")
+                            eval_trajectories.add(wandb.Table(columns=["n_target"],data=[[eval_n_target]], allow_mixed_types=True),f"option_{n_options}/n_target")
+                            """ 
+                            """
+                            writer.add_images(eval_logging_key + "obs", np.stack(obs_chain), dataformats="NHWC", global_step = n_options)
+                            for k, lat in enumerate(latents):
+                                writer.add_histogram(eval_logging_key + f"/latent_histogram_{k}", lat , global_step = n_options)
+                            [writer.add_scalars(eval_logging_key + "/norms", {"norms": norm}, global_step = n_options) for norm in norms]
+                            [writer.add_scalars(eval_logging_key + "/rewards", {"rewards:": traj_reward}, global_step = n_options) for traj_reward in traj_rewards]
+                            writer.add_scalar(eval_logging_key + "/levy_action", current_levy_action, global_step = n_options)
+                            writer.add_scalar(eval_logging_key + "/n", n_tracked_eval[-1], global_step = n_options)
+                            writer.add_scalar(eval_logging_key + "/n_target", eval_n_target, global_step = n_options)
+                            """
+                        
+                        n_options+=1
+                        # start new levy traj
+                        current_levy_action = torch.argmax(logits, dim=1).tolist()[0]
+                        
+                        n_tracked_eval.append(on_levy)
+                        # init table variables
+                        obs_chain = []
+                        latents = []
+                        traj_rewards = []
+                        first_row_done = True
+
+                    if on_levy > 0:
+                        action = current_levy_action
+
+                        latents.append(z.cpu().numpy())
+                        traj_rewards.append(reward)
+                    else:
+                        action = torch.argmax(logits, dim=1).tolist()[0]
+                        latents.append(z.cpu().numpy())
+                        traj_rewards.append(reward)
+
+
+                    on_levy = on_levy - 1 
+                    
+                    # take a step
+                    obs, reward, eval_done, info = env.step(action)
+                    obs_rgb = env.render("rgb_array") 
+                    obs_chain.append(obs_rgb)
+                    eval_episode_reward += reward
+
+
+            wandb.log({f"tables/table_{global_step}":eval_table})
 
             avg_n_eval = np.mean(n_tracked_eval)
             avg_mu_eval = np.mean(mu_tracked_eval)
@@ -1053,6 +1140,8 @@ for global_step in range(args.total_timesteps):
             eval_flag = False 
             eval_done = False
             on_levy = 0 
+            #wandb.log_artifact(eval_trajectories)
+
 
 env.close()
 
