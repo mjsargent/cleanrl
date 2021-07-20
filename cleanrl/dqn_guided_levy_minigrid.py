@@ -396,6 +396,7 @@ if __name__ == "__main__":
     parser.add_argument("--discount_latent_embedding", type=bool, default=1, help= "discount along the trajectories")
     parser.add_argument("--scale_override",type=float, default=-1)
     parser.add_argument("--pri_by_length", type=bool, help="prioiritise samples based on trajectory length", default=False)
+    parser.add_argument("--noisy_norms", type=bool, help="add noise to norms", default=False)
     
     args = parser.parse_args()
     if not args.seed:
@@ -568,12 +569,13 @@ class ReplayBufferNStepVariable():
             self.buffer.append((state, action, R ,last_obs, True))
 
 class ReplayBufferNStepLevy():
-    def __init__(self, buffer_limit, gamma, pri = False):
+    def __init__(self, buffer_limit, gamma, pri = False, pri_norm = False):
         self.buffer = collections.deque(maxlen=buffer_limit)
         self.nstep_buffer = [] 
         self.nsteps = None
         self.gamma = gamma
         self.pri = pri
+        self.pri_norm = pri_norm
         if self.pri:
             self.buffer_weights = collections.deque(maxlen=buffer_limit)
 
@@ -599,6 +601,7 @@ class ReplayBufferNStepLevy():
             self.buffer.append((first_state, action, R,transition[3] ,transition[4], len_traj, np.stack(all_states, axis=0), np.stack(all_next_states, axis=0)))
             if self.pri:
                 self.buffer_weights.append(len_traj)
+
 
         self.nsteps = n
 
@@ -827,7 +830,7 @@ target_network.load_state_dict(q_network.state_dict())
 
 optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
 loss_fn = nn.MSELoss()
-loss_fn_n = nn.L1Loss()
+loss_fn_n = nn.MSELoss()
 
 print(device.__repr__())
 print(q_network)
@@ -912,6 +915,8 @@ for global_step in range(args.total_timesteps):
                 delta_z = s_all_next_states.reshape(s_all_next_states.shape[0], -1) - s_all_states.reshape(s_all_states.shape[0], -1)
 
             delta_z_norms = torch.norm(delta_z, 2, dim = 1)      
+            if args.noisy_norms:
+                delta_z_norms = delta_z_norms + 0.01*torch.rand_like(delta_z_norms)
 
             value_loss_override = False
             if value_loss_override:
@@ -1049,7 +1054,7 @@ for global_step in range(args.total_timesteps):
             eval_table = wandb.Table(columns = eval_table_columns, allow_mixed_types=False)
             while not eval_done:
                 with torch.no_grad():
-                    logits, n, mu, sc, z = q_network.forward(obs.reshape((1,)+obs.shape), device, use_noise = True)
+                    logits, n, mu, sc, z = q_network.forward(obs.reshape((1,)+obs.shape), device, use_noise = False)
                     mu_tracked_eval.append(float(mu))
                     # levy action selection logic
                     if on_levy == 0:
@@ -1060,7 +1065,7 @@ for global_step in range(args.total_timesteps):
                         #if first_row_done and n_options % 3 == 0:
                         if first_row_done:
                             #concat final obs 
-                            obs_chain.append(obs_rgb)
+                            obs_chain.append(env.render("rgb_array"))
                             last_z = q_network.forward(obs.reshape((1,)+obs.shape), device, use_noise = True)[4]
                             latents.append(last_z.cpu().numpy())
                             
