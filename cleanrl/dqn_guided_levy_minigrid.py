@@ -426,7 +426,7 @@ if __name__ == "__main__":
     parser.add_argument("--value_conditioning", type=bool, default=True, help= "condition the action repeat on the current value estimate")
     parser.add_argument("--n_loss_weighting", type=float, default=0.5, help= "weightings of the value based and embedding based losses")
     parser.add_argument("--discount_latent_embedding", type=bool, default=1, help= "discount along the trajectories")
-    parser.add_argument("--scale_override",type=float, default=-1)
+    parser.add_argument("--scale_override",type=float, default=-10)
     parser.add_argument("--pri_by_length", type=bool, help="prioiritise samples based on trajectory length", default=False)
     parser.add_argument("--noisy_norms", type=bool, help="add noise to norms", default=False)
     
@@ -781,7 +781,7 @@ def layer_init(layer,std=np.sqrt(2),bias_const=0.0):
     return layer
 
 class QNetworkN(nn.Module):
-    def __init__(self, env, frames=3, condition=False, scale_override=-1, use_minatar=False):
+    def __init__(self, env, frames=3, condition=False, scale_override=-10, use_minatar=False):
         super(QNetworkN, self).__init__()
         n = env.observation_space.shape[0]
         m = env.observation_space.shape[1]
@@ -849,7 +849,7 @@ class QNetworkN(nn.Module):
 
             z_n = torch.cat([z_n,q], axis = 1)
             mu = self.mu_head(z_n)
-            scale = self.scale_head(z_n) #if self.scale_override > -1 else self.scale_override
+            scale = self.scale_head(z_n) if self.scale_override > -1 else torch.tensor([self.scale_override]*z_n.size(0), device= z_n.device)
             n = self.levy_head(mu, scale, use_noise)
 
 
@@ -863,8 +863,8 @@ class QNetworkN(nn.Module):
                 # detach q as well?
                 z_n = torch.cat([z_n,q], axis = 1)
                 mu = self.mu_head(z_n)
-                scale = self.scale_head(z_n) if self.scale_override > -1 else self.scale_override
-                n = self.levy_head(mu, scale)
+                scale = self.scale_head(z_n) if self.scale_override > -1 else torch.tensor([self.scale_override]*z_n.size(0), device= z_n.device)
+                n = self.levy_head(mu, scale, use_noise)
 
             else:
 
@@ -872,7 +872,7 @@ class QNetworkN(nn.Module):
                 z_n = z.clone().detach()
 
                 mu = self.mu_head(z_n)
-                scale = self.scale_head(z_n)
+                scale = self.scale_head(z_n) if self.scale_override > -1 else torch.tensor([self.scale_override]*z_n.size(0), device= z_n.device)
                 n = self.levy_head(mu, scale, use_noise)
 
                 q = self.q_head(z)
