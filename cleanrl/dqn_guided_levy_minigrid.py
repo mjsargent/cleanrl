@@ -4,6 +4,7 @@ from collections import deque
 import gym
 import gym_minigrid
 from gym import spaces
+from gym.utils import seeding
 from gym_minigrid.wrappers import ImgObsWrapper, FullyObsWrapper
 import cv2
 cv2.ocl.setUseOpenCL(False)
@@ -306,6 +307,37 @@ def wrap_deepmind(env, episode_life=True, clip_rewards=True, frame_stack=False, 
         env = FrameStack(env, 4)
     return env
 
+class MinAtarGym(gym.Env):
+    metadata = {'render.modes': "[human, rgb_array]"}
+
+    def __init__(self, env):
+        # pass in an initalised minatar env
+        self._env = env
+    
+        self.observation_space = spaces.Box(low=0, high=1, shape = self._env.state_shape())
+        self.action_space = spaces.Discrete(self._env.num_actions())
+
+    def step(self, action):
+        reward, done = self._env.act(action) 
+        next_state = self._env.state()
+        info = None
+        return next_state, reward, done, info
+
+    def reset(self):
+        self._env.reset()
+        return self._env.state()
+
+    def render(self, mode="human"):
+        if mode == "human":
+            self._env.display_state()
+        elif mode == "rgb_array":
+            o = self._env.state()
+            o = np.amax(o*np.reshape(np.arange(self._env.n_channels)+1,(1,1,-1)),2)+0.5
+            return o
+
+    def close(self):
+        self._env.close_display()
+
 # Reference: https://www.cs.toronto.edu/~vmnih/docs/dqn.pdf
 
 import torch
@@ -391,7 +423,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_sign_changes", type=bool, default=False, help= "use sign changes to choose an n as a target")
     parser.add_argument("--value_loss", type=bool, default=True, help= "use value as a target")
 
-    parser.add_argument("--value_conditioning", type=bool, default=False, help= "condition the action repeat on the current value estimate")
+    parser.add_argument("--value_conditioning", type=bool, default=True, help= "condition the action repeat on the current value estimate")
     parser.add_argument("--n_loss_weighting", type=float, default=0.5, help= "weightings of the value based and embedding based losses")
     parser.add_argument("--discount_latent_embedding", type=bool, default=1, help= "discount along the trajectories")
     parser.add_argument("--scale_override",type=float, default=-1)
@@ -418,15 +450,22 @@ if args.prod_mode:
 
 #TRY NOT TO MODIFY: seeding
 device = torch.device('cuda' if torch.cuda.is_available() and args.cuda else 'cpu')
-env = gym.make(args.gym_id)
 #env = wrap_atari(env)
-
-
-if args.fully_observable:
-    env = FullyObsWrapper(env)
-    print("Fully Observable Obs space: ", env.observation_space)
-
-env = ImgObsWrapper(env)
+if args.gym_id in ["mini_asterix", "mini_breakout", "mini_freeway", "mini_seaquest", "mini_invaders"] :
+    import minatar
+    from minatar import Environment as MiniEnv
+    mini_env = MiniEnv(args.gym_id.split("_")[1])
+    env = MinAtarGym(mini_env)
+    use_minatar = True
+    print("made min atar ")
+else:
+    env = gym.make(args.gym_id)
+    use_minatar = False
+    if args.fully_observable:
+        env = FullyObsWrapper(env)
+        print("Fully Observable Obs space: ", env.observation_space)
+    
+    env = ImgObsWrapper(env)
 print("Obs space: ", env.observation_space)
 #env = gym.wrappers.RecordEpisodeStatistics(env) # records episode reward in `info['episode']['r']`
 
@@ -742,7 +781,7 @@ def layer_init(layer,std=np.sqrt(2),bias_const=0.0):
     return layer
 
 class QNetworkN(nn.Module):
-    def __init__(self, env, frames=3, condition=False, scale_override=-1):
+    def __init__(self, env, frames=3, condition=False, scale_override=-1, use_minatar=False):
         super(QNetworkN, self).__init__()
         n = env.observation_space.shape[0]
         m = env.observation_space.shape[1]
@@ -750,21 +789,33 @@ class QNetworkN(nn.Module):
         self.linear_embedding_size = 64* ((n-1)//2 -2) * ((m-1)//2 - 2)
         print(self.linear_embedding_size)
         self.condition = condition
-        self.latent_dim = 512 + env.action_space.n if self.condition else 512
+        self.use_minatar = use_minatar
+        if use_minatar:
+            self.latent_dim = 1024 + env.action_space.n if self.condition else 1024
+        else:
+            self.latent_dim = 512 + env.action_space.n if self.condition else 512
         self.scale_override = scale_override
-        self.embedding = nn.Sequential(
-            Scale(1/255),
-            layer_init(nn.Conv2d(frames, 16, (2,2))),
-            nn.ReLU(),
-            nn.MaxPool2d((2,2)),
-            layer_init(nn.Conv2d(16, 32,(2,2))),
-            nn.ReLU(),
-            layer_init(nn.Conv2d(32, 64, (2,2))),
-            nn.ReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(self.linear_embedding_size, self.latent_dim)),
-            nn.ReLU()
-        )
+
+        if use_minatar:
+            self.conv = nn.Conv2d(int(env.observation_space.shape[2]),16,kernel_size=3, stride=1)
+            self.hidden = nn.Linear(1024, 128)
+            self.value_head = nn.Linear(128, env.action_space.n)
+
+        else:
+
+            self.embedding = nn.Sequential(
+                Scale(1/255),
+                layer_init(nn.Conv2d(frames, 16, (2,2))),
+                nn.ReLU(),
+                nn.MaxPool2d((2,2)),
+                layer_init(nn.Conv2d(16, 32,(2,2))),
+                nn.ReLU(),
+                layer_init(nn.Conv2d(32, 64, (2,2))),
+                nn.ReLU(),
+                nn.Flatten(),
+                layer_init(nn.Linear(self.linear_embedding_size, self.latent_dim)),
+                nn.ReLU()
+            )
         self.q_head =layer_init( nn.Linear(512, env.action_space.n))
 
         self.mu_head = nn.Sequential(nn.Linear(self.latent_dim, 64),
@@ -786,28 +837,45 @@ class QNetworkN(nn.Module):
     def forward(self, x, device, use_noise=True):
         x = np.swapaxes(x,1,3)
 
-        x = torch.Tensor(x).to(device)
-        if self.condition:
-            z = self.embedding(x)
-            q = self.q_head(z)
+        x = torch.FloatTensor(x).to(device)
+        if self.use_minatar:
 
-            z_n = z.clone().detach()
-            # detach q as well?
+            x = F.relu(self.conv(x))
+            x = x.view(x.size(0), -1)
+            
+            z_n = x.clone().detach()
+            x  = F.relu(self.hidden(x))
+            q = self.value_head(x)
+
             z_n = torch.cat([z_n,q], axis = 1)
             mu = self.mu_head(z_n)
-            scale = self.scale_head(z_n) if self.scale_override > -1 else self.scale_override
-            n = self.levy_head(mu, scale)
-
-        else:
-
-            z = self.embedding(x)
-            z_n = z.clone().detach()
-
-            mu = self.mu_head(z_n)
-            scale = self.scale_head(z_n)
+            scale = self.scale_head(z_n) #if self.scale_override > -1 else self.scale_override
             n = self.levy_head(mu, scale, use_noise)
 
-            q = self.q_head(z)
+
+
+        else:
+            if self.condition:
+                z = self.embedding(x)
+                q = self.q_head(z)
+
+                z_n = z.clone().detach()
+                # detach q as well?
+                z_n = torch.cat([z_n,q], axis = 1)
+                mu = self.mu_head(z_n)
+                scale = self.scale_head(z_n) if self.scale_override > -1 else self.scale_override
+                n = self.levy_head(mu, scale)
+
+            else:
+
+                z = self.embedding(x)
+                z_n = z.clone().detach()
+
+                mu = self.mu_head(z_n)
+                scale = self.scale_head(z_n)
+                n = self.levy_head(mu, scale, use_noise)
+
+                q = self.q_head(z)
 
         return q, n, mu, scale, z_n
 
@@ -817,11 +885,11 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     return max(slope * t + start_e, end_e)
    
 rb = ReplayBufferNStepLevy(args.buffer_size,  args.gamma, pri=args.pri_by_length)
-q_network = QNetworkN(env, scale_override=args.scale_override)
+q_network = QNetworkN(env, condition = args.value_conditioning, scale_override=args.scale_override, use_minatar = use_minatar)
 #q_network = nn.DataParallel(q_network)
 q_network = q_network.to(device)
 
-target_network = QNetworkN(env, scale_override=args.scale_override)
+target_network = QNetworkN(env,condition = args.value_conditioning,scale_override=args.scale_override, use_minatar=use_minatar)
 #target_network = nn.DataParallel(target_network)
 target_network = target_network.to(device)
 
@@ -890,7 +958,6 @@ for global_step in range(args.total_timesteps):
     # take a step
     next_obs, reward, done, info = env.step(action)
     episode_reward += reward
-
 
     rb.put((obs, action, reward, next_obs, done), n)
 
@@ -1071,7 +1138,8 @@ for global_step in range(args.total_timesteps):
                             
                             delta_z = [latents[i+1] - latents[i] for i in range(len(latents) - 1)]
                             norms = [float(np.linalg.norm(i, 2)) for i in delta_z] 
-                            delta_obs = [obs_chain[i+1].flatten() - obs_chain[i].flatten() for i in range(len(obs_chain)-1)]
+                            delta_obs = [obs_chain[i+1].flatten().astype(float) - obs_chain[i].flatten().astype(float) for i in range(len(obs_chain)-1)]
+                            
                             norms_obs = [float(np.linalg.norm(i, 2)) for i in delta_obs] 
                             eval_n_target = np.argmax(norms)
 
