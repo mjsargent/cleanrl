@@ -409,26 +409,26 @@ if __name__ == "__main__":
                         help="coefficent used for determining the init of mu net")
     parser.add_argument("--n_steps", type=int, default=3, 
                               help = "number of steps used in nstep return")
-    parser.add_argument("--fully_observable", type=bool, default=False,
+    parser.add_argument("--fully_observable", type=lambda x:bool(strtobool(x)), default=False,
                         help="use the fully observable env wrapper")
     parser.add_argument("--clip_n", type = int, default = 25, 
                         help="maximum number of action repeats")
     parser.add_argument('--eval_frequency', type=int, default=100000,
                         help="the frequency of noiseless eval")
     # n network losses
-    parser.add_argument("--obs_target", type=bool, default=False, help="use norm of the observations as a target")
-    parser.add_argument("--latent_target", type=bool, default=True, help= "use latent norm as a target")
-    parser.add_argument("--n_weighted", type=bool, default=False, help= "use weighted target n")
-    parser.add_argument("--n_argmax",type = bool,default=False,  help= "take the argmax of latent loss as a target")
-    parser.add_argument("--n_sign_changes", type=bool, default=False, help= "use sign changes to choose an n as a target")
-    parser.add_argument("--value_loss", type=bool, default=True, help= "use value as a target")
+    parser.add_argument("--obs_target", type=lambda x:bool(strtobool(x)), default=False, help="use norm of the observations as a target")
+    parser.add_argument("--latent_target", type=lambda x:bool(strtobool(x)), default=True, help= "use latent norm as a target")
+    parser.add_argument("--n_weighted", type=lambda x:bool(strtobool(x)), default=False, help= "use weighted target n")
+    parser.add_argument("--n_argmax",type=lambda x:bool(strtobool(x)),default=False,  help= "take the argmax of latent loss as a target")
+    parser.add_argument("--n_sign_changes", type=lambda x:bool(strtobool(x)), default=False, help= "use sign changes to choose an n as a target")
+    parser.add_argument("--value_loss", type=lambda x:bool(strtobool(x)), default=True, help= "use value as a target")
 
-    parser.add_argument("--value_conditioning", type=bool, default=True, help= "condition the action repeat on the current value estimate")
+    parser.add_argument("--value_conditioning", type=lambda x:bool(strtobool(x)), default=True, help= "condition the action repeat on the current value estimate")
     parser.add_argument("--n_loss_weighting", type=float, default=0.5, help= "weightings of the value based and embedding based losses")
-    parser.add_argument("--discount_latent_embedding", type=bool, default=1, help= "discount along the trajectories")
+    parser.add_argument("--discount_latent_embedding", type=lambda x:bool(strtobool(x)), default=True, help= "discount along the trajectories")
     parser.add_argument("--scale_override",type=float, default=-10)
-    parser.add_argument("--pri_by_length", type=bool, help="prioiritise samples based on trajectory length", default=False)
-    parser.add_argument("--noisy_norms", type=bool, help="add noise to norms", default=False)
+    parser.add_argument("--pri_by_length", type=lambda x:bool(strtobool(x)), help="prioiritise samples based on trajectory length", default=False)
+    parser.add_argument("--noisy_norms", type=lambda x:bool(strtobool(x)), help="add noise to norms", default=False)
     
     args = parser.parse_args()
     if not args.seed:
@@ -461,6 +461,7 @@ if args.gym_id in ["mini_asterix", "mini_breakout", "mini_freeway", "mini_seaque
 else:
     env = gym.make(args.gym_id)
     use_minatar = False
+    print(args.fully_observable)
     if args.fully_observable:
         env = FullyObsWrapper(env)
         print("Fully Observable Obs space: ", env.observation_space)
@@ -813,7 +814,7 @@ class QNetworkN(nn.Module):
                 layer_init(nn.Conv2d(32, 64, (2,2))),
                 nn.ReLU(),
                 nn.Flatten(),
-                layer_init(nn.Linear(self.linear_embedding_size, self.latent_dim)),
+                layer_init(nn.Linear(self.linear_embedding_size, 512)),
                 nn.ReLU()
             )
         self.q_head =layer_init( nn.Linear(512, env.action_space.n))
@@ -849,10 +850,8 @@ class QNetworkN(nn.Module):
 
             z_n = torch.cat([z_n,q], axis = 1)
             mu = self.mu_head(z_n)
-            scale = self.scale_head(z_n) if self.scale_override > -1 else torch.tensor([self.scale_override]*z_n.size(0), device= z_n.device)
+            scale = self.scale_head(z_n) if self.scale_override < -1 else torch.tensor([self.scale_override]*z_n.size(0), device= z_n.device).unsqueeze(1)
             n = self.levy_head(mu, scale, use_noise)
-
-
 
         else:
             if self.condition:
@@ -863,7 +862,8 @@ class QNetworkN(nn.Module):
                 # detach q as well?
                 z_n = torch.cat([z_n,q], axis = 1)
                 mu = self.mu_head(z_n)
-                scale = self.scale_head(z_n) if self.scale_override > -1 else torch.tensor([self.scale_override]*z_n.size(0), device= z_n.device)
+                scale = self.scale_head(z_n) if self.scale_override < -1 else torch.tensor([self.scale_override]*z_n.size(0), device= z_n.device).unsqueeze(1)
+
                 n = self.levy_head(mu, scale, use_noise)
 
             else:
@@ -872,7 +872,7 @@ class QNetworkN(nn.Module):
                 z_n = z.clone().detach()
 
                 mu = self.mu_head(z_n)
-                scale = self.scale_head(z_n) if self.scale_override > -1 else torch.tensor([self.scale_override]*z_n.size(0), device= z_n.device)
+                scale = self.scale_head(z_n) if self.scale_override < -1 else torch.tensor([self.scale_override]*z_n.size(0), device= z_n.device).unsqueeze(1)
                 n = self.levy_head(mu, scale, use_noise)
 
                 q = self.q_head(z)
