@@ -7,6 +7,8 @@ from gym import spaces
 from gym.utils import seeding
 from gym_minigrid.wrappers import ImgObsWrapper, FullyObsWrapper
 import cv2
+import seaborn as sns
+from PIL import Image as PILImage
 cv2.ocl.setUseOpenCL(False)
 
 class NoopResetEnv(gym.Wrapper):
@@ -331,8 +333,21 @@ class MinAtarGym(gym.Env):
         if mode == "human":
             self._env.display_state()
         elif mode == "rgb_array":
+            mpl = __import__('matplotlib.colors', globals(), locals())
+            colors = mpl.colors
+            cmap = sns.color_palette("cubehelix", self._env.n_channels)
+            cmap.insert(0, (0,0,0))
+            cmap = colors.ListedColormap(cmap)
+            bounds = [i for i in range(self._env.n_channels+2)]
+            norm = colors.BoundaryNorm(bounds, self._env.n_channels+1)
+
             o = self._env.state()
-            o = np.amax(o*np.reshape(np.arange(self._env.n_channels)+1,(1,1,-1)),2)+0.5
+            
+            o = np.amax(o*np.reshape(np.arange(self._env.n_channels)+1,(1,1,-1)),2)+0.5 
+            o = cmap(norm(o))
+
+            o = o[:, :, np.newaxis]
+            
             return o
 
     def close(self):
@@ -1132,7 +1147,8 @@ for global_step in range(args.total_timesteps):
                         #if first_row_done and n_options % 3 == 0:
                         if first_row_done:
                             #concat final obs 
-                            obs_chain.append(env.render("rgb_array"))
+                            _obs = env.render("rgb_array")
+                            obs_chain.append(_obs)
                             last_z = q_network.forward(obs.reshape((1,)+obs.shape), device, use_noise = True)[4]
                             latents.append(last_z.cpu().numpy())
                             
