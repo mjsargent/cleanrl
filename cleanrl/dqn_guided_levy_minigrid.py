@@ -994,7 +994,7 @@ for global_step in range(args.total_timesteps):
                 all_z_old = q_network.forward(s_all_states,device)[4]
                 delta_z = all_z_targets-all_z_old 
             else:
-                delta_z = s_all_next_states.reshape(s_all_next_states.shape[0], -1) - s_all_states.reshape(s_all_states.shape[0], -1)
+                delta_z = torch.FloatTensor(s_all_next_states.reshape(s_all_next_states.shape[0], -1) - s_all_states.reshape(s_all_states.shape[0], -1)).to(device)
 
             delta_z_norms = torch.norm(delta_z, 2, dim = 1)      
             if args.noisy_norms:
